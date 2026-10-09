@@ -200,14 +200,14 @@ function Transactions({ month, onError }: PageProps & { month: string }) {
       <div className="table-wrap">
         <table>
           <thead>
-            <tr><th>Date</th><th>Description</th><th>Account</th><th>Category</th><th className="num">Amount</th></tr>
+            <tr><th>Date</th><th>Description</th><th className="account">Account</th><th>Category</th><th className="num">Amount</th></tr>
           </thead>
           <tbody>
             {rows.map((t) => (
               <tr key={t.id} className={t.pending ? 'pending' : ''}>
                 <td>{t.date}</td>
-                <td title={t.name}>{t.merchant || t.name}{t.pending ? ' (pending)' : ''}</td>
-                <td className="muted">{t.account_name}</td>
+                <td className="clip" title={t.name}>{t.merchant || t.name}{t.pending ? ' (pending)' : ''}</td>
+                <td className="clip account muted" title={t.account_name}>{t.account_name}</td>
                 <td>
                   <select value={t.category_id ?? ''} onChange={(e) => recategorize(t, Number(e.target.value))}>
                     {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}

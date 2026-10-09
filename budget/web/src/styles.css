@@ -79,8 +79,15 @@ section .item { background: transparent; }
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; }
 .grow { flex: 1; min-width: 200px; }
 .table-wrap { overflow-x: auto; }
-table { width: 100%; border-collapse: collapse; }
+table { width: 100%; border-collapse: collapse; table-layout: auto; }
 th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+/* Long descriptions and account names truncate so the amount column always stays visible. */
+td.clip { max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
+td.clip.account { max-width: 160px; }
+@media (max-width: 800px) {
+  td.clip { max-width: 140px; }
+  td.clip.account, th.account, .tag { display: none; }
+}
 th { color: var(--muted); font-size: 13px; font-weight: 500; }
 tfoot td { font-weight: 600; border-bottom: none; }
 .num { text-align: right; font-variant-numeric: tabular-nums; }
