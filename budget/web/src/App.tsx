@@ -177,7 +177,7 @@ function Transactions({ month, onError }: PageProps & { month: string }) {
 
   const recategorize = async (t: any, categoryId: number) => {
     const label = t.merchant || t.name
-    const remember = window.confirm(`Always put "${label}" in this category?\n\nOK = this and all matching transactions\nCancel = just this one`)
+    const remember = window.confirm(`Always put "${label}" in this category?\n\nOK = this and all matching transactions (adds a merchant rule)\nCancel = just this one (for merchants like Costco that differ each trip)`)
     try {
       await api(`transactions/${encodeURIComponent(t.id)}`, 'PATCH', { category_id: categoryId, remember })
       load()
@@ -254,6 +254,7 @@ function Budget({ month, onError }: PageProps & { month: string }) {
 
   const expenses = rows.filter((r) => r.kind === 'expense')
   return (
+    <>
     <section>
       <div className="toolbar">
         <span className="muted">Monthly targets apply to every month. Leave blank for no target.</span>
@@ -287,6 +288,39 @@ function Budget({ month, onError }: PageProps & { month: string }) {
           </tfoot>
         </table>
       </div>
+    </section>
+    <Rules onError={onError} />
+    </>
+  )
+}
+
+// Merchant rules: one merchant always lands in one category. Delete a rule for
+// merchants like Costco where each trip can be groceries, pharmacy or gas.
+function Rules({ onError }: PageProps) {
+  const [rules, setRules] = useState<{ pattern: string; category: string }[]>([])
+  const load = useCallback(() => {
+    api('rules').then(setRules).catch((e) => onError(e.message))
+  }, [onError])
+  useEffect(load, [load])
+  const remove = async (pattern: string) => {
+    try {
+      await api(`rules/${encodeURIComponent(pattern)}`, 'DELETE')
+      load()
+    } catch (e: any) {
+      onError(e.message)
+    }
+  }
+  return (
+    <section>
+      <h2>Merchant rules</h2>
+      <p className="muted">Made when you answer OK to "always put this merchant in this category". Already-labelled transactions keep their category when a rule is deleted; new ones go back to the AI.</p>
+      {!rules.length && <p className="muted">No rules yet.</p>}
+      {rules.map((r) => (
+        <div className="account" key={r.pattern}>
+          <div>{r.pattern} <span className="muted">→ {r.category}</span></div>
+          <button className="link" onClick={() => remove(r.pattern)}>Delete</button>
+        </div>
+      ))}
     </section>
   )
 }
