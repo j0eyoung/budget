@@ -160,6 +160,16 @@ const budgetRows = (month: string) => db.prepare(`
   FROM categories c LEFT JOIN budgets b ON b.category_id = c.id
   ORDER BY c.kind, c.name`).all(month) as { id: number; name: string; kind: string; budget: number; spent: number }[]
 
+// Merchant rules created from the "remember" prompt in the Transactions tab.
+app.get('/api/rules', (_req, res) => {
+  res.json(db.prepare(`SELECT r.pattern, r.category_id, c.name AS category FROM rules r JOIN categories c ON c.id = r.category_id ORDER BY r.pattern`).all())
+})
+
+app.delete('/api/rules/:pattern', (req, res) => {
+  db.prepare('DELETE FROM rules WHERE pattern = ?').run(req.params.pattern)
+  res.json({ ok: true })
+})
+
 app.get('/api/budget', (req, res) => {
   res.json(budgetRows(String(req.query.month || currentMonth())))
 })
