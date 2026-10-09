@@ -29,7 +29,7 @@ body {
   color: var(--text);
   font: 15px/1.45 system-ui, -apple-system, 'Segoe UI', sans-serif;
 }
-.app { max-width: 1000px; margin: 0 auto; padding: 16px; }
+.app { max-width: 1200px; margin: 0 auto; padding: 16px; }
 
 header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 16px; }
 h1 { font-size: 20px; margin: 0; }
@@ -79,14 +79,19 @@ section .item { background: transparent; }
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; }
 .grow { flex: 1; min-width: 200px; }
 .table-wrap { overflow-x: auto; }
-table { width: 100%; border-collapse: collapse; table-layout: auto; }
-th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
-/* Long descriptions and account names truncate so the amount column always stays visible. */
-td.clip { max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
-td.clip.account { max-width: 160px; }
+/* Fixed layout: columns share the available width and long text truncates,
+   so the table never needs a horizontal scrollbar on desktop. */
+table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+th.date, td.date { width: 96px; }
+th.account, td.account { width: 24%; }
+th.category, td.category { width: 230px; }
+th.num, td.num { width: 110px; }
+td.category select { max-width: calc(100% - 44px); }
 @media (max-width: 800px) {
-  td.clip { max-width: 140px; }
-  td.clip.account, th.account, .tag { display: none; }
+  th.account, td.account, .tag { display: none; }
+  th.category, td.category { width: 150px; }
+  td.category select { max-width: 100%; }
 }
 th { color: var(--muted); font-size: 13px; font-weight: 500; }
 tfoot td { font-weight: 600; border-bottom: none; }
