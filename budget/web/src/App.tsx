@@ -97,7 +97,7 @@ function Dashboard({ month, status, onError }: PageProps & { month: string; stat
       <section>
         <h2>Monthly insights</h2>
         {insight ? <p className="insight">{insight}</p> : <p className="muted">No review generated for this month yet.</p>}
-        <button onClick={generate} disabled={busy || !status?.aiConfigured}>
+        <button onClick={generate} disabled={busy}>
           {busy ? 'Generating…' : insight ? 'Regenerate' : 'Generate review'}
         </button>
         {status && !status.aiConfigured && <span className="muted"> Connect Claude in the Accounts tab first.</span>}
@@ -428,7 +428,11 @@ function ClaudeConnect({ onError, onStatus }: PageProps & { onStatus: () => void
     }
   }
 
-  const signedIn = state?.loggedIn && !state?.expired
+  const signedIn = Boolean(state?.loggedIn && !state?.expired)
+  // The app-level status (which gates the AI buttons) must follow the sign-in state.
+  useEffect(() => {
+    if (state) onStatus()
+  }, [signedIn, state, onStatus])
   return (
     <section>
       <h2>Claude</h2>
@@ -487,7 +491,7 @@ function Ask({ status, onError }: PageProps & { status: Status | null }) {
       {status && !status.aiConfigured && <p className="notice">Connect Claude in the Accounts tab to use this.</p>}
       <form className="toolbar" onSubmit={submit}>
         <input className="grow" placeholder="How much did I spend on dining last month?" value={question} onChange={(e) => setQuestion(e.target.value)} />
-        <button disabled={busy || !status?.aiConfigured}>{busy ? 'Thinking…' : 'Ask'}</button>
+        <button disabled={busy}>{busy ? 'Thinking…' : 'Ask'}</button>
       </form>
       {log.map((entry, i) => (
         <div className="qa" key={log.length - i}>
