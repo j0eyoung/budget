@@ -4,20 +4,31 @@ import type { Category, Transaction } from './api.ts'
 
 type Part = { category_id: string; amount: string }
 
+// What a receipt photo suggested: parts that already add up to the charge,
+// plus a note summarizing the items.
+export type Proposal = {
+  parts: { category_id: number; amount: number }[]
+  summary: string
+  warning?: string
+}
+
 // Splits one bank line (e.g. a Costco trip) into parts with their own
 // categories. The last part always takes whatever is left, so parts add up.
-export function SplitEditor({ t, categories, onDone, onError }: {
+export function SplitEditor({ t, categories, proposal, onDone, onError }: {
   t: Transaction
   categories: Category[]
+  proposal?: Proposal
   onDone: () => void
   onError: (message: string) => void
 }) {
   const sign = t.amount < 0 ? -1 : 1
   const total = Math.abs(t.amount)
   const [parts, setParts] = useState<Part[]>(() =>
-    t.splits.length
-      ? t.splits.map((s) => ({ category_id: String(s.category_id), amount: Math.abs(s.amount).toFixed(2) }))
-      : [{ category_id: String(t.category_id ?? ''), amount: '' }, { category_id: '', amount: '' }],
+    proposal
+      ? proposal.parts.map((p) => ({ category_id: String(p.category_id), amount: Math.abs(p.amount).toFixed(2) }))
+      : t.splits.length
+        ? t.splits.map((s) => ({ category_id: String(s.category_id), amount: Math.abs(s.amount).toFixed(2) }))
+        : [{ category_id: String(t.category_id ?? ''), amount: '' }, { category_id: '', amount: '' }],
   )
   const [busy, setBusy] = useState(false)
 
@@ -31,6 +42,8 @@ export function SplitEditor({ t, categories, onDone, onError }: {
     setBusy(true)
     try {
       await api(`transactions/${encodeURIComponent(t.id)}/splits`, 'PUT', { splits })
+      // Keep what the receipt said, unless there's already a note.
+      if (proposal && splits.length && !t.notes) await api(`transactions/${encodeURIComponent(t.id)}`, 'PATCH', { notes: proposal.summary })
       onDone()
     } catch (e: any) {
       onError(e.message)
@@ -46,7 +59,11 @@ export function SplitEditor({ t, categories, onDone, onError }: {
 
   return (
     <div className="split-editor">
-      <div className="muted">Split {money(total)} from {t.merchant || t.name}</div>
+      <div className="muted">
+        {proposal ? `From your receipt: check the split of ${money(total)} and save` : `Split ${money(total)} from ${t.merchant || t.name}`}
+      </div>
+      {proposal?.warning && <div className="over">{proposal.warning}</div>}
+      {proposal && <div className="note">{proposal.summary}</div>}
       {parts.map((p, i) => {
         const last = i === parts.length - 1
         return (

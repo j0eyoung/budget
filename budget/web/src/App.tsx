@@ -1,11 +1,15 @@
-import { Fragment, useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import { addMonths, api, dollars, money, monthLabel, thisMonth } from './api.ts'
 import type { BudgetRow, Category, Status, Transaction } from './api.ts'
 import { CashFlow } from './CashFlow.tsx'
 import { CsvImport } from './CsvImport.tsx'
 import { DebtPage } from './Debt.tsx'
 import { RecurringPage } from './Recurring.tsx'
+import { photoToJpeg } from './photo.ts'
 import { SplitEditor } from './SplitEditor.tsx'
+import type { Proposal } from './SplitEditor.tsx'
+
+const CADENCES = ['weekly', 'every 2 weeks', 'twice a month', 'monthly', 'quarterly', 'yearly']
 
 const TABS = ['Dashboard', 'Transactions', 'Budget', 'Recurring', 'Debt', 'Accounts', 'Ask'] as const
 type Tab = (typeof TABS)[number]
@@ -222,6 +226,10 @@ function Transactions({ month, onError }: PageProps & { month: string }) {
   const [category, setCategory] = useState('')
   const [busy, setBusy] = useState(false)
   const [splitting, setSplitting] = useState<string | null>(null)
+  const [proposal, setProposal] = useState<Proposal | undefined>()
+  const [reading, setReading] = useState<string | null>(null)
+  const receiptInput = useRef<HTMLInputElement>(null)
+  const receiptFor = useRef<Transaction | null>(null)
 
   const load = useCallback(() => {
     const params = new URLSearchParams({ month })
@@ -258,6 +266,53 @@ function Transactions({ month, onError }: PageProps & { month: string }) {
     }
   }
 
+  const openSplit = (t: Transaction, p?: Proposal) => {
+    setProposal(p)
+    setSplitting(splitting === t.id && !p ? null : t.id)
+  }
+
+  // Receipt photo: Claude groups the items into categories. One category just
+  // recategorizes; several open the split editor prefilled for confirmation.
+  const pickReceipt = (t: Transaction) => {
+    receiptFor.current = t
+    receiptInput.current?.click()
+  }
+  const readReceipt = async (file: File | undefined) => {
+    const t = receiptFor.current
+    if (receiptInput.current) receiptInput.current.value = ''
+    if (!file || !t) return
+    setReading(t.id)
+    try {
+      const image = await photoToJpeg(file)
+      const r = await api(`transactions/${encodeURIComponent(t.id)}/receipt`, 'POST', { image: image.data, media_type: image.mediaType })
+      const warning = r.mismatch ? `The receipt total (${money(r.receiptTotal)}) doesn't match the charge (${money(t.amount)}); amounts were scaled to the charge. Check it's the right receipt.` : undefined
+      if (r.parts.length === 1) {
+        if (window.confirm(`${r.summary}\n\nPut this ${money(t.amount)} charge in ${r.parts[0].category}?${warning ? `\n\n${warning}` : ''}`)) {
+          await api(`transactions/${encodeURIComponent(t.id)}`, 'PATCH', { category_id: r.parts[0].category_id, ...(t.notes ? {} : { notes: r.summary }) })
+          load()
+        }
+      } else {
+        openSplit(t, { parts: r.parts, summary: r.summary, warning })
+      }
+    } catch (e: any) {
+      onError(e.message)
+    }
+    setReading(null)
+  }
+
+  const markRecurring = async (t: Transaction) => {
+    const label = t.merchant || t.name
+    const answer = window.prompt(`How often does ${label} charge?\n${CADENCES.join(', ')}`, 'monthly')
+    if (answer == null) return
+    const cadence = answer.trim().toLowerCase()
+    if (!CADENCES.includes(cadence)) return onError(`"${answer}" isn't one of: ${CADENCES.join(', ')}`)
+    try {
+      await api('recurring', 'PUT', { label, status: 'yes', cadence })
+    } catch (e: any) {
+      onError(e.message)
+    }
+  }
+
   const editNote = async (t: Transaction) => {
     const notes = window.prompt(`Note for ${t.merchant || t.name} (${money(-t.amount)})`, t.notes ?? '')
     if (notes == null) return
@@ -279,6 +334,8 @@ function Transactions({ month, onError }: PageProps & { month: string }) {
         </select>
         <span className="muted">{rows.length} transactions</span>
         <button onClick={recategorizeAll} disabled={busy}>{busy ? 'Categorizing…' : 'Re-run AI categories'}</button>
+        {/* capture opens the camera on phones; on desktop it's a normal file picker */}
+        <input ref={receiptInput} type="file" accept="image/*" capture="environment" hidden onChange={(e) => readReceipt(e.target.files?.[0])} />
       </div>
       <div className="table-wrap">
         <table>
@@ -295,9 +352,17 @@ function Transactions({ month, onError }: PageProps & { month: string }) {
                     <td>
                       <div className="desc">
                         <span className="desc-text" title={t.name}>{t.merchant || t.name}{t.pending ? ' (pending)' : ''}</span>
-                        <span className="row-actions">
-                          <button className="mini" onClick={() => editNote(t)}>{t.notes ? 'edit note' : 'note'}</button>
-                          {!t.pending && <button className="mini" onClick={() => setSplitting(splitting === t.id ? null : t.id)}>split</button>}
+                        <span className={`row-actions ${reading === t.id ? 'busy' : ''}`}>
+                          {reading === t.id ? (
+                            <span className="muted">reading receipt…</span>
+                          ) : (
+                            <>
+                              <button className="mini" onClick={() => editNote(t)}>{t.notes ? 'edit note' : 'note'}</button>
+                              {!t.pending && <button className="mini" onClick={() => openSplit(t)}>split</button>}
+                              {!t.pending && t.amount > 0 && <button className="mini" onClick={() => pickReceipt(t)}>receipt</button>}
+                              {t.amount > 0 && <button className="mini" onClick={() => markRecurring(t)}>recurring</button>}
+                            </>
+                          )}
                         </span>
                       </div>
                       {t.notes && <div className="note" title={t.notes}>{t.notes}</div>}
@@ -305,7 +370,7 @@ function Transactions({ month, onError }: PageProps & { month: string }) {
                     <td className="account muted" title={t.account_name ?? ''}>{t.account_name}</td>
                     <td className="category">
                       {t.splits.length ? (
-                        <button className="mini split-label" onClick={() => setSplitting(t.id)}>
+                        <button className="mini split-label" onClick={() => openSplit(t)}>
                           Split into {t.splits.length}{Math.abs(splitTotal - t.amount) > 0.005 ? ' ⚠' : ''}
                         </button>
                       ) : (
@@ -331,8 +396,8 @@ function Transactions({ month, onError }: PageProps & { month: string }) {
                   {splitting === t.id && (
                     <tr className="split-edit-row">
                       <td colSpan={5}>
-                        <SplitEditor t={t} categories={categories} onError={onError}
-                          onDone={() => { setSplitting(null); load() }} />
+                        <SplitEditor key={proposal ? proposal.summary : 'manual'} t={t} categories={categories} proposal={proposal} onError={onError}
+                          onDone={() => { setSplitting(null); setProposal(undefined); load() }} />
                       </td>
                     </tr>
                   )}

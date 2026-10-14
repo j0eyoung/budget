@@ -9,12 +9,13 @@ import { backupDb, categoryIdByName, db, meta, runReadOnly } from './db.ts'
 import { debtSummary } from './debts.ts'
 import { syncHealth } from './health.ts'
 import { addMonths, budgetRows, currentMonth, today } from './queries.ts'
-import { detectRecurring } from './recurring.ts'
+import { readReceipt } from './receipt.ts'
+import { CADENCES, clearRecurringOverride, detectRecurring, ignoredRecurring, setRecurringOverride } from './recurring.ts'
 import { claimSetupToken, disconnect, isConnected, syncSimpleFin } from './simplefin.ts'
 
 const app = express()
-// Large enough for a CSV import of a few thousand rows.
-app.use(express.json({ limit: '5mb' }))
+// Large enough for a CSV import of a few thousand rows or a receipt photo.
+app.use(express.json({ limit: '10mb' }))
 
 // As an add-on the server listens on all interfaces: trust Home Assistant's
 // ingress proxy, and require the API token from anything else (e.g. the
@@ -259,6 +260,15 @@ app.put('/api/transactions/:id/splits', (req, res) => {
   res.json({ ok: true })
 })
 
+// Body: {image: base64 JPEG/PNG without the data: prefix, media_type}.
+// Returns a proposed split; the browser shows it for confirmation.
+app.post('/api/transactions/:id/receipt', async (req, res) => {
+  const mediaType = String(req.body.media_type || 'image/jpeg')
+  const data = String(req.body.image || '')
+  if (!data || !/^image\/(jpeg|png|webp|gif)$/.test(mediaType)) return res.status(400).json({ error: 'Send a JPEG or PNG photo.' })
+  res.json(await readReceipt(req.params.id, { data, mediaType }))
+})
+
 // Merchant rules created from the "remember" prompt in the Transactions tab.
 app.get('/api/rules', (_req, res) => {
   res.json(db.prepare(`SELECT r.pattern, r.category_id, c.name AS category FROM rules r JOIN categories c ON c.id = r.category_id ORDER BY r.pattern`).all())
@@ -335,7 +345,19 @@ app.get('/api/tracked', (req, res) => {
 })
 
 app.get('/api/recurring', (_req, res) => {
-  res.json(detectRecurring())
+  res.json({ items: detectRecurring(), ignored: ignoredRecurring(), cadences: CADENCES.map((c) => c.name) })
+})
+
+// Body: {key | label, status: 'yes' | 'no', cadence?}. From the Recurring page
+// (key) or a transaction's "recurring" action (label = merchant).
+app.put('/api/recurring', (req, res) => {
+  setRecurringOverride(req.body ?? {})
+  res.json({ ok: true })
+})
+
+app.delete('/api/recurring/:key', (req, res) => {
+  clearRecurringOverride(req.params.key)
+  res.json({ ok: true })
 })
 
 app.get('/api/debts', (_req, res) => {

@@ -17,6 +17,7 @@ Personal budgeting app: Node 24 server (TypeScript run directly, no build step) 
 - The SimpleFIN access URL (it embeds credentials) lives in `data/secrets.db`, never in `budget.db`, and is not backed up. Never read, print or copy `data/secrets.db` or `.env`, and never ask the user to paste a setup token or access URL into chat; it goes in the Accounts tab or the add-on options.
 - Target hardware is a Home Assistant Green (ARM, 4 GB, eMMC): keep dependencies light and avoid chatty disk writes.
 - `GET /api/summary` and `GET /api/briefing` are the contract for the Daily Briefing add-on; only add fields, never rename or remove.
+- The Claude CLI never gets tools or file access. Receipt photos go in as a stream-json image block (`askClaudeWithImage`), are resized in the browser first, and are never stored.
 - Schema changes go through `addColumn` in [server/db.ts](server/db.ts) so existing databases (and restored backups) migrate on start.
 
 ## Analyzing the user's finances
@@ -38,6 +39,7 @@ Schema:
 - `categories(id, name, kind, track)`: kind is expense | income | savings | transfer; only expense counts as spending. track = running-total card on the dashboard.
 - `budgets(category_id, amount)`: monthly target.
 - `balance_snapshots(date, account_id, balance)`: daily signed balances, for net worth over time.
+- `recurring_overrides(merchant_key, label, status, cadence)`: the user's corrections to recurring detection; status yes (confirmed, cadence optional) or no (hidden). merchant_key is the normalized merchant from [server/recurring.ts](server/recurring.ts).
 - `rules(pattern, category_id)`, `insights(month, content, created_at)`, `meta(key, value)` (last_sync, last_sync_errors, last_sync_failure, last_backup, briefing).
 
 Describe what the data shows; do not give personalized investment advice.

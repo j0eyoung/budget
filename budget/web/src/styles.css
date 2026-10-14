@@ -154,6 +154,12 @@ label.map { font-size: 13px; color: var(--muted); }
 .desc { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .desc-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .row-actions { display: flex; gap: 4px; flex: none; }
+/* With a mouse, row actions appear on hover so descriptions keep their width;
+   on touch screens they're always shown. */
+@media (hover: hover) {
+  .row-actions { display: none; }
+  tr:hover .row-actions, .row-actions.busy { display: flex; }
+}
 button.mini { padding: 0 6px; font-size: 11px; color: var(--muted); border-color: transparent; background: transparent; }
 button.mini:hover { border-color: var(--border); color: var(--text); }
 button.split-label { font-size: 13px; color: var(--text); border-color: var(--border); padding: 3px 8px; }
@@ -170,13 +176,17 @@ th.track, td.track { width: 100px; text-align: center; }
 .debt-table th.plan, .debt-table td.plan { width: 70px; text-align: center; }
 .debt-table td { vertical-align: middle; }
 input.small { width: 84px; }
-.recurring-table th.cadence, .recurring-table td.cadence { width: 120px; }
+.recurring-table th.cadence, .recurring-table td.cadence { width: 150px; }
+.recurring-table td.cadence select { width: 100%; padding: 3px 6px; }
+.recurring-table th.actions, .recurring-table td.actions { width: 150px; text-align: right; }
 .recurring-table th.date, .recurring-table td.date { width: 110px; }
 .badge { margin-left: 8px; font-size: 11px; padding: 1px 6px; border-radius: 10px; border: 1px solid var(--border); color: var(--muted); }
 .badge.up { border-color: var(--bad); color: var(--bad); }
 @media (max-width: 800px) {
   .opt, th.track, td.track { display: none; }
   .debt-table th.pace, .debt-table td.pace { display: none; }
+  .recurring-table th.cadence, .recurring-table td.cadence { width: 125px; }
+  .recurring-table th.actions, .recurring-table td.actions { width: 92px; white-space: normal; }
   .cf-net { font-size: 10px; }
 }
 

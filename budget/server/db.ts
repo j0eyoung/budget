@@ -67,6 +67,14 @@ CREATE TABLE IF NOT EXISTS splits (
   category_id INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_splits_transaction ON splits(transaction_id);
+-- The user's corrections to recurring detection, keyed by normalized merchant.
+-- status 'yes' = definitely recurring (cadence optional), 'no' = never show.
+CREATE TABLE IF NOT EXISTS recurring_overrides (
+  merchant_key TEXT PRIMARY KEY,
+  label TEXT,
+  status TEXT NOT NULL,
+  cadence TEXT
+);
 CREATE TABLE IF NOT EXISTS budgets (
   category_id INTEGER PRIMARY KEY,
   amount REAL NOT NULL

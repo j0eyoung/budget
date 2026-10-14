@@ -73,12 +73,12 @@ export async function available(): Promise<boolean> {
 
 const isAuthError = (msg: string) => /authenticate|oauth|log in|login|not logged|unauthorized|401/i.test(msg)
 
+const BASE_ARGS = ['-p', '--restricted', '--no-session-persistence', '--tools', '', '--max-turns', '1', '--effort', 'low']
+
 // One complete answer, no tools, no session saved.
 export async function askClaude(prompt: string, timeoutMs = 180000): Promise<string> {
   const useToken = !(await signedIn())
-  const args = ['-p', '--restricted', '--no-session-persistence', '--tools', '', '--max-turns', '1',
-    '--effort', 'low', '--model', config.claudeModel, '--output-format', 'json']
-  const { out, err } = await run(args, prompt, useToken, timeoutMs)
+  const { out, err } = await run([...BASE_ARGS, '--model', config.claudeModel, '--output-format', 'json'], prompt, useToken, timeoutMs)
   const i = out.indexOf('{')
   let data: any
   try {
@@ -86,6 +86,40 @@ export async function askClaude(prompt: string, timeoutMs = 180000): Promise<str
   } catch {
     throw new Error(`Claude Code failed: ${(err || out).trim().slice(0, 300)}`)
   }
+  return resultText(data)
+}
+
+// Same, with one image (a receipt photo). The image goes in as a content
+// block over stream-json input, so the CLI still gets no file access.
+export async function askClaudeWithImage(prompt: string, image: { data: string; mediaType: string }, timeoutMs = 180000): Promise<string> {
+  const useToken = !(await signedIn())
+  const message = {
+    type: 'user',
+    message: {
+      role: 'user',
+      content: [
+        { type: 'image', source: { type: 'base64', media_type: image.mediaType, data: image.data } },
+        { type: 'text', text: prompt },
+      ],
+    },
+  }
+  const args = [...BASE_ARGS, '--model', config.claudeModel, '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose']
+  const { out, err } = await run(args, `${JSON.stringify(message)}\n`, useToken, timeoutMs)
+  const result = out
+    .split('\n')
+    .map((line) => {
+      try {
+        return JSON.parse(line)
+      } catch {
+        return null
+      }
+    })
+    .find((event) => event?.type === 'result')
+  if (!result) throw new Error(`Claude Code failed: ${(err || out).trim().slice(0, 300)}`)
+  return resultText(result)
+}
+
+function resultText(data: any): string {
   if (data.is_error) {
     const msg = String(data.result || data.subtype || 'unknown error')
     if (isAuthError(msg)) {

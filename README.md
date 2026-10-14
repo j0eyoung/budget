@@ -14,9 +14,9 @@ Home Assistant add-on: personal budgeting with SimpleFIN bank sync and Claude Co
 ## What it does
 
 - **Dashboard**: today's check ("anything to flag?"), spend vs budget with last-month comparison, tracked categories with running totals, monthly cash flow, net worth.
-- **Transactions**: AI categories, merchant rules, notes, and splits (one Costco trip into groceries + pharmacy).
+- **Transactions**: AI categories, merchant rules, notes, and splits (one Costco trip into groceries + pharmacy). **receipt** takes a photo of the receipt; Claude groups the items by category and the split editor opens prefilled for you to confirm. The photo isn't stored.
 - **Budget**: monthly targets, 3-month averages, one-click fill from averages.
-- **Recurring**: detected bills and subscriptions, monthly total, price increases, ones that may have stopped.
+- **Recurring**: detected bills and subscriptions, monthly total, price increases, ones that may have stopped. Change how often, mark one as not recurring (with undo), or add a missed one with **recurring** on its transaction.
 - **Debt**: current payoff pace per account and an avalanche vs snowball plan with extra payments.
 - **Health**: warns when an account stops updating or a sync fails.
 - **Backups**: the database is copied nightly to the add-on's config folder (`/addon_configs/<id>_budget/backups`, last 7 kept) and restored automatically if the add-on starts with empty data. The SimpleFIN connection is not backed up; reconnect with a new setup token after a reinstall.
