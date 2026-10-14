@@ -97,10 +97,10 @@ function previousMonth(month: string): string {
 export async function generateInsights(month: string): Promise<string> {
   const byCategory = db.prepare(`
     SELECT c.name AS category, ROUND(SUM(t.amount), 2) AS spent, b.amount AS budget
-    FROM transactions t JOIN categories c ON c.id = t.category_id LEFT JOIN budgets b ON b.category_id = c.id
+    FROM ledger t JOIN categories c ON c.id = t.category_id LEFT JOIN budgets b ON b.category_id = c.id
     WHERE c.kind = 'expense' AND substr(t.date, 1, 7) = ? GROUP BY c.id ORDER BY spent DESC`)
   const sumKind = db.prepare(`
-    SELECT ROUND(-SUM(t.amount), 2) AS total FROM transactions t JOIN categories c ON c.id = t.category_id
+    SELECT ROUND(-SUM(t.amount), 2) AS total FROM ledger t JOIN categories c ON c.id = t.category_id
     WHERE c.kind = ? AND substr(t.date, 1, 7) = ?`)
   const data = {
     month,
@@ -110,11 +110,11 @@ export async function generateInsights(month: string): Promise<string> {
     preTaxSavings: sumKind.get('savings', month),
     topMerchants: db.prepare(`
       SELECT COALESCE(t.merchant, t.name) AS merchant, COUNT(*) AS count, ROUND(SUM(t.amount), 2) AS total
-      FROM transactions t JOIN categories c ON c.id = t.category_id
+      FROM ledger t JOIN categories c ON c.id = t.category_id
       WHERE c.kind = 'expense' AND substr(t.date, 1, 7) = ? GROUP BY 1 ORDER BY total DESC LIMIT 15`).all(month),
     largest: db.prepare(`
       SELECT t.date, COALESCE(t.merchant, t.name) AS merchant, t.amount, c.name AS category
-      FROM transactions t JOIN categories c ON c.id = t.category_id
+      FROM ledger t JOIN categories c ON c.id = t.category_id
       WHERE c.kind = 'expense' AND substr(t.date, 1, 7) = ? ORDER BY t.amount DESC LIMIT 10`).all(month),
     debts: db.prepare(`SELECT name, type, -balance AS owed FROM accounts WHERE balance < 0`).all(),
   }

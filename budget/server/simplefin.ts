@@ -109,6 +109,7 @@ export async function syncSimpleFin(): Promise<{ added: number; errors: string[]
       }
     }
     meta.set('last_sync', now)
+    meta.set('last_sync_errors', JSON.stringify(data.errors ?? []))
     db.exec('COMMIT')
   } catch (err) {
     db.exec('ROLLBACK')

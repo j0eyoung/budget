@@ -1,8 +1,13 @@
-import { useCallback, useEffect, useState } from 'react'
-import { api, money, thisMonth } from './api.ts'
-import type { BudgetRow, Category, Status } from './api.ts'
+import { Fragment, useCallback, useEffect, useState } from 'react'
+import { addMonths, api, dollars, money, monthLabel, thisMonth } from './api.ts'
+import type { BudgetRow, Category, Status, Transaction } from './api.ts'
+import { CashFlow } from './CashFlow.tsx'
+import { CsvImport } from './CsvImport.tsx'
+import { DebtPage } from './Debt.tsx'
+import { RecurringPage } from './Recurring.tsx'
+import { SplitEditor } from './SplitEditor.tsx'
 
-const TABS = ['Dashboard', 'Transactions', 'Budget', 'Accounts', 'Ask'] as const
+const TABS = ['Dashboard', 'Transactions', 'Budget', 'Recurring', 'Debt', 'Accounts', 'Ask'] as const
 type Tab = (typeof TABS)[number]
 
 export function App() {
@@ -16,10 +21,11 @@ export function App() {
   }, [])
   useEffect(loadStatus, [loadStatus])
 
+  const issues = status?.health?.issues ?? []
   return (
     <div className="app">
       <header>
-        <h1>Budget</h1>
+        <h1><img className="logo" src="./icon.svg" alt="" />Budget</h1>
         <nav>
           {TABS.map((t) => (
             <button key={t} className={t === tab ? 'active' : ''} onClick={() => setTab(t)}>{t}</button>
@@ -31,10 +37,18 @@ export function App() {
       {status && !status.connected && tab !== 'Accounts' && (
         <p className="notice">No bank connection yet. Go to Accounts and paste a SimpleFIN setup token.</p>
       )}
+      {issues.length > 0 && (
+        <div className="notice warn">
+          <strong>⚠ Needs attention</strong>
+          <ul>{issues.map((i) => <li key={i}>{i}</li>)}</ul>
+        </div>
+      )}
       <main>
         {tab === 'Dashboard' && <Dashboard month={month} status={status} onError={setError} />}
         {tab === 'Transactions' && <Transactions month={month} onError={setError} />}
         {tab === 'Budget' && <Budget month={month} onError={setError} />}
+        {tab === 'Recurring' && <RecurringPage onError={setError} />}
+        {tab === 'Debt' && <DebtPage onError={setError} />}
         {tab === 'Accounts' && <Accounts status={status} onError={setError} onStatus={loadStatus} />}
         {tab === 'Ask' && <Ask status={status} onError={setError} />}
       </main>
@@ -43,22 +57,26 @@ export function App() {
 }
 
 type PageProps = { onError: (message: string) => void }
+type Tracked = { id: number; name: string; total: number; since: string; thisMonth: number }
 
 function Dashboard({ month, status, onError }: PageProps & { month: string; status: Status | null }) {
   const [rows, setRows] = useState<BudgetRow[]>([])
   const [worth, setWorth] = useState<{ date: string; assets: number; debts: number }[]>([])
+  const [tracked, setTracked] = useState<Tracked[]>([])
   const [insight, setInsight] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
     api<BudgetRow[]>(`budget?month=${month}`).then(setRows).catch((e) => onError(e.message))
     api(`insights?month=${month}`).then((r) => setInsight(r?.content ?? null)).catch((e) => onError(e.message))
+    api<Tracked[]>(`tracked?month=${month}`).then(setTracked).catch((e) => onError(e.message))
     api('networth').then(setWorth).catch((e) => onError(e.message))
   }, [month, onError])
 
   const expenses = rows.filter((r) => r.kind === 'expense')
   const spent = expenses.reduce((sum, r) => sum + r.spent, 0)
   const budgeted = expenses.reduce((sum, r) => sum + r.budget, 0)
+  const prevSpent = expenses.reduce((sum, r) => sum + r.prev, 0)
   const income = -rows.filter((r) => r.kind === 'income').reduce((sum, r) => sum + r.spent, 0) || 0
   const saved = -rows.filter((r) => r.kind === 'savings').reduce((sum, r) => sum + r.spent, 0) || 0
   const latest = worth.at(-1)
@@ -75,19 +93,28 @@ function Dashboard({ month, status, onError }: PageProps & { month: string; stat
 
   return (
     <>
+      {month === thisMonth() && <Today status={status} onError={onError} />}
       <div className="cards">
-        <Card label="Spent" value={money(spent)} sub={budgeted ? `of ${money(budgeted)} budgeted` : 'no budget set'} />
+        <Card label="Spent" value={money(spent)} sub={`${budgeted ? `of ${money(budgeted)} budgeted · ` : ''}${dollars(prevSpent)} last month`} />
         <Card label="Income" value={money(income)} sub={`${money(income - spent)} net`} />
         <Card label="Pre-tax savings" value={money(saved)} sub="401k, HSA, investment activity" />
         <Card label="Net worth" value={latest ? money(latest.assets - latest.debts) : '—'} sub={latest ? `${money(latest.debts)} owed` : 'connect an account'} />
+        {tracked.map((t) => {
+          const months = Math.max(1, monthsBetween(t.since.slice(0, 7), thisMonth()) + 1)
+          return (
+            <Card key={t.id} label={`${t.name} (to date)`} value={money(t.total)}
+              sub={`${money(t.thisMonth)} in ${monthLabel(month, false)} · ${dollars(t.total / months)}/mo since ${monthLabel(t.since.slice(0, 7))}`} />
+          )
+        })}
       </div>
       <section>
-        <h2>Spending by category</h2>
-        {expenses.filter((r) => r.spent > 0 || r.budget > 0).sort((a, b) => b.spent - a.spent).map((r) => (
+        <h2>Spending by category <span className="muted">vs {monthLabel(addMonths(month, -1), false)}</span></h2>
+        {expenses.filter((r) => r.spent > 0 || r.budget > 0 || r.prev > 0).sort((a, b) => b.spent - a.spent).map((r) => (
           <CategoryBar key={r.id} row={r} />
         ))}
         {!expenses.some((r) => r.spent > 0 || r.budget > 0) && <p className="muted">No spending recorded for this month.</p>}
       </section>
+      <CashFlow onError={onError} />
       {worth.length > 1 && (
         <section>
           <h2>Net worth over time</h2>
@@ -106,6 +133,41 @@ function Dashboard({ month, status, onError }: PageProps & { month: string; stat
   )
 }
 
+function monthsBetween(from: string, to: string) {
+  const [fy, fm] = from.split('-').map(Number)
+  const [ty, tm] = to.split('-').map(Number)
+  return (ty - fy) * 12 + (tm - fm)
+}
+
+// Today's "anything to flag?" check. Written once a day after the sync; the
+// button regenerates it on demand.
+function Today({ status, onError }: PageProps & { status: Status | null }) {
+  const [text, setText] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    api('briefing').then((r) => setText(r.briefing?.text ?? null)).catch((e) => onError(e.message))
+  }, [onError])
+  const refresh = async () => {
+    setBusy(true)
+    try {
+      setText((await api('briefing', 'POST')).briefing.text)
+    } catch (e: any) {
+      onError(e.message)
+    }
+    setBusy(false)
+  }
+  if (!text && !status?.aiConfigured) return null
+  return (
+    <section className="today">
+      <div className="chart-head">
+        <h2>Today</h2>
+        <button onClick={refresh} disabled={busy}>{busy ? 'Checking…' : text ? 'Check again' : 'Check today'}</button>
+      </div>
+      {text ? <p className="insight">{text}</p> : <p className="muted">Not checked yet today.</p>}
+    </section>
+  )
+}
+
 function Card({ label, value, sub }: { label: string; value: string; sub: string }) {
   return (
     <div className="card">
@@ -119,10 +181,18 @@ function Card({ label, value, sub }: { label: string; value: string; sub: string
 function CategoryBar({ row }: { row: BudgetRow }) {
   const pct = row.budget ? Math.min(100, (row.spent / row.budget) * 100) : 100
   const over = row.budget > 0 && row.spent > row.budget
+  const delta = row.spent - row.prev
   return (
     <div className="bar-row">
       <div className="bar-label">
-        <span>{row.name}</span>
+        <span>
+          {row.name}
+          {row.prev > 0 || row.spent > 0 ? (
+            <span className={`delta ${delta > 0.5 ? 'up' : delta < -0.5 ? 'down' : ''}`}>
+              {delta > 0.5 ? '▲' : delta < -0.5 ? '▼' : '='} {dollars(row.prev)} last month
+            </span>
+          ) : null}
+        </span>
         <span className={over ? 'over' : ''}>
           {money(row.spent)}{row.budget ? ` / ${money(row.budget)}` : ''}
         </span>
@@ -146,11 +216,25 @@ function Sparkline({ values }: { values: number[] }) {
 }
 
 function Transactions({ month, onError }: PageProps & { month: string }) {
-  const [rows, setRows] = useState<any[]>([])
+  const [rows, setRows] = useState<Transaction[]>([])
   const [categories, setCategories] = useState<Category[]>([])
   const [q, setQ] = useState('')
   const [category, setCategory] = useState('')
   const [busy, setBusy] = useState(false)
+  const [splitting, setSplitting] = useState<string | null>(null)
+
+  const load = useCallback(() => {
+    const params = new URLSearchParams({ month })
+    if (q) params.set('q', q)
+    if (category) params.set('category', category)
+    api<Transaction[]>(`transactions?${params}`).then(setRows).catch((e) => onError(e.message))
+  }, [month, q, category, onError])
+
+  useEffect(load, [load])
+  useEffect(() => {
+    api<Category[]>('categories').then(setCategories).catch((e) => onError(e.message))
+  }, [onError])
+  const categoryName = (id: number | null) => categories.find((c) => c.id === id)?.name ?? '—'
 
   const recategorizeAll = async () => {
     setBusy(true)
@@ -163,23 +247,22 @@ function Transactions({ month, onError }: PageProps & { month: string }) {
     setBusy(false)
   }
 
-  const load = useCallback(() => {
-    const params = new URLSearchParams({ month })
-    if (q) params.set('q', q)
-    if (category) params.set('category', category)
-    api(`transactions?${params}`).then(setRows).catch((e) => onError(e.message))
-  }, [month, q, category, onError])
-
-  useEffect(load, [load])
-  useEffect(() => {
-    api<Category[]>('categories').then(setCategories).catch((e) => onError(e.message))
-  }, [onError])
-
-  const recategorize = async (t: any, categoryId: number) => {
+  const recategorize = async (t: Transaction, categoryId: number) => {
     const label = t.merchant || t.name
     const remember = window.confirm(`Always put "${label}" in this category?\n\nOK = this and all matching transactions (adds a merchant rule)\nCancel = just this one (for merchants like Costco that differ each trip)`)
     try {
       await api(`transactions/${encodeURIComponent(t.id)}`, 'PATCH', { category_id: categoryId, remember })
+      load()
+    } catch (e: any) {
+      onError(e.message)
+    }
+  }
+
+  const editNote = async (t: Transaction) => {
+    const notes = window.prompt(`Note for ${t.merchant || t.name} (${money(-t.amount)})`, t.notes ?? '')
+    if (notes == null) return
+    try {
+      await api(`transactions/${encodeURIComponent(t.id)}`, 'PATCH', { notes })
       load()
     } catch (e: any) {
       onError(e.message)
@@ -203,20 +286,59 @@ function Transactions({ month, onError }: PageProps & { month: string }) {
             <tr><th className="date">Date</th><th>Description</th><th className="account">Account</th><th className="category">Category</th><th className="num">Amount</th></tr>
           </thead>
           <tbody>
-            {rows.map((t) => (
-              <tr key={t.id} className={t.pending ? 'pending' : ''}>
-                <td className="date">{t.date}</td>
-                <td title={t.name}>{t.merchant || t.name}{t.pending ? ' (pending)' : ''}</td>
-                <td className="account muted" title={t.account_name}>{t.account_name}</td>
-                <td className="category">
-                  <select value={t.category_id ?? ''} onChange={(e) => recategorize(t, Number(e.target.value))}>
-                    {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-                  </select>
-                  <span className="tag">{t.category_source}</span>
-                </td>
-                <td className={`num ${t.amount < 0 ? 'inflow' : ''}`}>{money(-t.amount)}</td>
-              </tr>
-            ))}
+            {rows.map((t) => {
+              const splitTotal = t.splits.reduce((s, p) => s + p.amount, 0)
+              return (
+                <Fragment key={t.id}>
+                  <tr className={t.pending ? 'pending' : ''}>
+                    <td className="date">{t.date}</td>
+                    <td>
+                      <div className="desc">
+                        <span className="desc-text" title={t.name}>{t.merchant || t.name}{t.pending ? ' (pending)' : ''}</span>
+                        <span className="row-actions">
+                          <button className="mini" onClick={() => editNote(t)}>{t.notes ? 'edit note' : 'note'}</button>
+                          {!t.pending && <button className="mini" onClick={() => setSplitting(splitting === t.id ? null : t.id)}>split</button>}
+                        </span>
+                      </div>
+                      {t.notes && <div className="note" title={t.notes}>{t.notes}</div>}
+                    </td>
+                    <td className="account muted" title={t.account_name ?? ''}>{t.account_name}</td>
+                    <td className="category">
+                      {t.splits.length ? (
+                        <button className="mini split-label" onClick={() => setSplitting(t.id)}>
+                          Split into {t.splits.length}{Math.abs(splitTotal - t.amount) > 0.005 ? ' ⚠' : ''}
+                        </button>
+                      ) : (
+                        <>
+                          <select value={t.category_id ?? ''} onChange={(e) => recategorize(t, Number(e.target.value))}>
+                            {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                          </select>
+                          <span className="tag">{t.category_source}</span>
+                        </>
+                      )}
+                    </td>
+                    <td className={`num ${t.amount < 0 ? 'inflow' : ''}`}>{money(-t.amount)}</td>
+                  </tr>
+                  {t.splits.map((s) => (
+                    <tr className="split-row" key={`${t.id}-${s.id}`}>
+                      <td className="date" />
+                      <td className="muted">↳ part</td>
+                      <td className="account" />
+                      <td className="category">{categoryName(s.category_id)}</td>
+                      <td className="num muted">{money(-s.amount)}</td>
+                    </tr>
+                  ))}
+                  {splitting === t.id && (
+                    <tr className="split-edit-row">
+                      <td colSpan={5}>
+                        <SplitEditor t={t} categories={categories} onError={onError}
+                          onDone={() => { setSplitting(null); load() }} />
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              )
+            })}
           </tbody>
         </table>
       </div>
@@ -226,30 +348,35 @@ function Transactions({ month, onError }: PageProps & { month: string }) {
 
 function Budget({ month, onError }: PageProps & { month: string }) {
   const [rows, setRows] = useState<BudgetRow[]>([])
+  const [message, setMessage] = useState('')
   const load = useCallback(() => {
     api<BudgetRow[]>(`budget?month=${month}`).then(setRows).catch((e) => onError(e.message))
   }, [month, onError])
   useEffect(load, [load])
 
-  const save = async (id: number, value: string) => {
+  const run = async (fn: () => Promise<unknown>) => {
     try {
-      await api(`budget/${id}`, 'PUT', { amount: Number(value) || 0 })
+      await fn()
       load()
     } catch (e: any) {
       onError(e.message)
     }
+  }
+  const save = (id: number, value: string) => run(() => api(`budget/${id}`, 'PUT', { amount: Number(value) || 0 }))
+  const track = (id: number, on: boolean) => run(() => api(`categories/${id}`, 'PATCH', { track: on }))
+  const fill = () => {
+    if (!window.confirm('Set a target for every category that has none, from its 3-month average rounded up to the next $10? Existing targets stay as they are.')) return
+    run(async () => {
+      const r = await api('budget/fill', 'POST', { month })
+      setMessage(r.filled ? `Filled ${r.filled} targets. Trim any that look high.` : 'Nothing to fill: every category with spending already has a target.')
+    })
   }
 
   const addCategory = async () => {
     const name = window.prompt('New category name')
     if (!name?.trim()) return
     const kind = window.prompt('Kind: expense, income, savings or transfer', 'expense') || 'expense'
-    try {
-      await api('categories', 'POST', { name, kind })
-      load()
-    } catch (e: any) {
-      onError(e.message)
-    }
+    run(() => api('categories', 'POST', { name, kind }))
   }
 
   const expenses = rows.filter((r) => r.kind === 'expense')
@@ -257,13 +384,18 @@ function Budget({ month, onError }: PageProps & { month: string }) {
     <>
     <section>
       <div className="toolbar">
-        <span className="muted">Monthly targets apply to every month. Leave blank for no target.</span>
+        <span className="muted grow">Monthly targets apply to every month. Leave blank for no target.</span>
+        <button onClick={fill}>Fill empty targets from 3-month average</button>
         <button onClick={addCategory}>Add category</button>
       </div>
+      {message && <p className="muted">{message}</p>}
       <div className="table-wrap">
-        <table>
+        <table className="budget-table">
           <thead>
-            <tr><th>Category</th><th className="num">Monthly target</th><th className="num">Spent</th><th className="num">Remaining</th></tr>
+            <tr>
+              <th>Category</th><th className="num">Monthly target</th><th className="num opt">3-mo avg</th><th className="num opt">Last month</th>
+              <th className="num">Spent</th><th className="num">Remaining</th><th className="track" title="Show a running total on the dashboard">On dashboard</th>
+            </tr>
           </thead>
           <tbody>
             {expenses.map((r) => (
@@ -271,10 +403,14 @@ function Budget({ month, onError }: PageProps & { month: string }) {
                 <td>{r.name}</td>
                 <td className="num">
                   <input className="amount" type="number" min="0" step="10" defaultValue={r.budget || ''} key={r.budget}
+                    placeholder={r.avg3 > 0 ? String(Math.ceil(r.avg3 / 10) * 10) : ''}
                     onBlur={(e) => Number(e.target.value || 0) !== r.budget && save(r.id, e.target.value)} />
                 </td>
+                <td className="num opt muted">{r.avg3 ? dollars(r.avg3) : '—'}</td>
+                <td className="num opt muted">{r.prev ? dollars(r.prev) : '—'}</td>
                 <td className="num">{money(r.spent)}</td>
                 <td className={`num ${r.budget && r.spent > r.budget ? 'over' : ''}`}>{r.budget ? money(r.budget - r.spent) : '—'}</td>
+                <td className="track"><input type="checkbox" checked={Boolean(r.track)} onChange={(e) => track(r.id, e.target.checked)} /></td>
               </tr>
             ))}
           </tbody>
@@ -282,8 +418,11 @@ function Budget({ month, onError }: PageProps & { month: string }) {
             <tr>
               <td>Total</td>
               <td className="num">{money(expenses.reduce((s, r) => s + r.budget, 0))}</td>
+              <td className="num opt">{dollars(expenses.reduce((s, r) => s + r.avg3, 0))}</td>
+              <td className="num opt">{dollars(expenses.reduce((s, r) => s + r.prev, 0))}</td>
               <td className="num">{money(expenses.reduce((s, r) => s + r.spent, 0))}</td>
               <td />
+              <td className="track" />
             </tr>
           </tfoot>
         </table>
@@ -389,7 +528,10 @@ function Accounts({ status, onError, onStatus }: PageProps & { status: Status | 
             <button onClick={connect} disabled={!token.trim() || Boolean(busy)}>{busy === 'connect' ? 'Connecting…' : 'Connect'}</button>
           </div>
         )}
-        <p className="muted">SimpleFIN allows about 24 requests a day; the app syncs once a day on its own.</p>
+        <p className="muted">
+          SimpleFIN allows about 24 requests a day; the app syncs once a day on its own.
+          {status?.health?.lastBackup ? ` Last backup ${new Date(status.health.lastBackup).toLocaleString()}.` : ''}
+        </p>
       </section>
 
       {groups.map(([org, list]) => (
@@ -433,6 +575,8 @@ function Accounts({ status, onError, onStatus }: PageProps & { status: Status | 
           <button onClick={addManual} disabled={!manual.name.trim() || Boolean(busy)}>Add</button>
         </div>
       </section>
+
+      <CsvImport accounts={accounts} onError={onError} onDone={load} />
     </>
   )
 }
@@ -470,7 +614,7 @@ function ClaudeConnect({ onError, onStatus }: PageProps & { onStatus: () => void
   return (
     <section>
       <h2>Claude</h2>
-      <p className="muted">Categorization, questions and monthly reviews run through Claude Code on your subscription. Nothing is sent anywhere else.</p>
+      <p className="muted">Categorization, questions, daily checks and monthly reviews run through Claude Code on your subscription. Nothing is sent anywhere else.</p>
       {signedIn ? (
         <div className="toolbar">
           <span>Signed in{state.authMethod ? ` (${state.authMethod})` : ''}</span>

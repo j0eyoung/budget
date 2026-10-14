@@ -1,8 +1,12 @@
 # Home Assistant add-on definition; installed from the GitHub repo (see ../README.md).
 name: Budget
-version: "0.2.3"
+version: "0.3.0"
 slug: budget
 description: Personal budgeting with SimpleFIN sync and Claude Code AI
+# The add-on's own config folder, mounted at /config: nightly database
+# backups go to /config/backups and are restored if /data is ever empty.
+map:
+  - addon_config:rw
 arch:
   - amd64
   - aarch64

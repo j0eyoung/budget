@@ -2,13 +2,19 @@ import crypto from 'node:crypto'
 import path from 'node:path'
 import express from 'express'
 import { aiAvailable, ask, categorizeWithAi, generateInsights } from './ai.ts'
+import { briefingData, cachedBriefing, generateBriefing } from './briefing.ts'
 import { authStatus, loginState, logout, sendLoginCode, startLogin } from './claude.ts'
 import { config } from './config.ts'
-import { db, meta, runReadOnly } from './db.ts'
+import { backupDb, categoryIdByName, db, meta, runReadOnly } from './db.ts'
+import { debtSummary } from './debts.ts'
+import { syncHealth } from './health.ts'
+import { addMonths, budgetRows, currentMonth, today } from './queries.ts'
+import { detectRecurring } from './recurring.ts'
 import { claimSetupToken, disconnect, isConnected, syncSimpleFin } from './simplefin.ts'
 
 const app = express()
-app.use(express.json())
+// Large enough for a CSV import of a few thousand rows.
+app.use(express.json({ limit: '5mb' }))
 
 // As an add-on the server listens on all interfaces: trust Home Assistant's
 // ingress proxy, and require the API token from anything else (e.g. the
@@ -23,11 +29,17 @@ app.use((req, res, next) => {
 })
 
 const ACCOUNT_TYPES = ['depository', 'credit', 'loan', 'investment', 'other']
-const currentMonth = () => new Date().toISOString().slice(0, 7)
-const today = () => new Date().toISOString().slice(0, 10)
+const optionalNumber = (v: unknown) => (v === '' || v == null || !Number.isFinite(Number(v)) ? null : Number(v))
 
 async function syncAndCategorize() {
-  const result = await syncSimpleFin()
+  let result
+  try {
+    result = await syncSimpleFin()
+    meta.delete('last_sync_failure')
+  } catch (err: any) {
+    meta.set('last_sync_failure', JSON.stringify({ at: new Date().toISOString(), message: err.message }))
+    throw err
+  }
   let categorized = 0
   try {
     categorized = await categorizeWithAi()
@@ -38,7 +50,7 @@ async function syncAndCategorize() {
 }
 
 app.get('/api/status', async (_req, res) => {
-  res.json({ connected: isConnected(), lastSync: meta.get('last_sync'), aiConfigured: await aiAvailable() })
+  res.json({ connected: isConnected(), lastSync: meta.get('last_sync'), aiConfigured: await aiAvailable(), health: syncHealth() })
 })
 
 // Claude Code sign-in, driven from the Accounts tab.
@@ -95,19 +107,24 @@ app.post('/api/accounts', (req, res) => {
 })
 
 app.patch('/api/accounts/:id', (req, res) => {
-  const account = db.prepare('SELECT source FROM accounts WHERE id = ?').get(req.params.id) as { source: string } | undefined
+  const id = req.params.id
+  const account = db.prepare('SELECT source FROM accounts WHERE id = ?').get(id) as { source: string } | undefined
   if (!account) return res.status(404).json({ error: 'No such account' })
-  if (ACCOUNT_TYPES.includes(req.body.type)) db.prepare('UPDATE accounts SET type = ? WHERE id = ?').run(req.body.type, req.params.id)
+  if (ACCOUNT_TYPES.includes(req.body.type)) db.prepare('UPDATE accounts SET type = ? WHERE id = ?').run(req.body.type, id)
+  if ('apr' in req.body) db.prepare('UPDATE accounts SET apr = ? WHERE id = ?').run(optionalNumber(req.body.apr), id)
+  if ('min_payment' in req.body) db.prepare('UPDATE accounts SET min_payment = ? WHERE id = ?').run(optionalNumber(req.body.min_payment), id)
+  if ('in_plan' in req.body) db.prepare('UPDATE accounts SET in_plan = ? WHERE id = ?').run(req.body.in_plan ? 1 : 0, id)
   if (account.source === 'manual' && req.body.balance != null) {
     const balance = Number(req.body.balance) || 0
-    db.prepare('UPDATE accounts SET balance = ?, balance_date = ?, updated_at = ? WHERE id = ?').run(balance, today(), new Date().toISOString(), req.params.id)
-    db.prepare('INSERT OR REPLACE INTO balance_snapshots (date, account_id, balance) VALUES (?, ?, ?)').run(today(), req.params.id, balance)
+    db.prepare('UPDATE accounts SET balance = ?, balance_date = ?, updated_at = ? WHERE id = ?').run(balance, today(), new Date().toISOString(), id)
+    db.prepare('INSERT OR REPLACE INTO balance_snapshots (date, account_id, balance) VALUES (?, ?, ?)').run(today(), id, balance)
   }
   res.json({ ok: true })
 })
 
 app.delete('/api/accounts/:id', (req, res) => {
   db.exec('BEGIN')
+  db.prepare('DELETE FROM splits WHERE transaction_id IN (SELECT id FROM transactions WHERE account_id = ?)').run(req.params.id)
   db.prepare('DELETE FROM transactions WHERE account_id = ?').run(req.params.id)
   db.prepare('DELETE FROM balance_snapshots WHERE account_id = ?').run(req.params.id)
   db.prepare('DELETE FROM accounts WHERE id = ?').run(req.params.id)
@@ -115,8 +132,49 @@ app.delete('/api/accounts/:id', (req, res) => {
   res.json({ ok: true })
 })
 
+// CSV rows arrive already parsed by the browser: {date: 'YYYY-MM-DD', description, amount}
+// with amount > 0 = money out. Ids are derived from the row contents, so
+// importing the same file twice adds nothing the second time.
+app.post('/api/accounts/:id/import', (req, res) => {
+  const accountId = req.params.id
+  if (!db.prepare('SELECT 1 FROM accounts WHERE id = ?').get(accountId)) return res.status(404).json({ error: 'No such account' })
+  const rows = Array.isArray(req.body.rows) ? req.body.rows : []
+  const rule = db.prepare('SELECT category_id FROM rules WHERE pattern = ?')
+  const insert = db.prepare(`
+    INSERT OR IGNORE INTO transactions (id, account_id, date, name, merchant, amount, pending, category_id, category_source)
+    VALUES (?, ?, ?, ?, NULL, ?, 0, ?, ?)`)
+  const fallback = categoryIdByName('Other')
+  const seen = new Map<string, number>()
+  let added = 0
+  let invalid = 0
+  db.exec('BEGIN')
+  try {
+    for (const r of rows) {
+      const date = String(r.date ?? '')
+      const description = String(r.description ?? '').trim()
+      const amount = Math.round(Number(r.amount) * 100) / 100
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !description || !Number.isFinite(amount) || amount === 0) {
+        invalid++
+        continue
+      }
+      const key = `${accountId}|${date}|${amount}|${description}`
+      const n = (seen.get(key) ?? 0) + 1
+      seen.set(key, n)
+      const id = `csv-${crypto.createHash('sha1').update(`${key}|${n}`).digest('hex').slice(0, 24)}`
+      const hit = rule.get(description.toLowerCase()) as { category_id: number } | undefined
+      added += Number(insert.run(id, accountId, date, description, amount, hit?.category_id ?? fallback, hit ? 'rule' : 'none').changes)
+    }
+    db.exec('COMMIT')
+  } catch (err) {
+    db.exec('ROLLBACK')
+    throw err
+  }
+  categorizeWithAi().catch((err) => console.error('Categorizing imported rows failed:', err.message))
+  res.json({ added, duplicates: rows.length - added - invalid, invalid })
+})
+
 app.get('/api/categories', (_req, res) => {
-  res.json(db.prepare('SELECT id, name, kind FROM categories ORDER BY kind, name').all())
+  res.json(db.prepare('SELECT id, name, kind, track FROM categories ORDER BY kind, name').all())
 })
 
 app.post('/api/categories', (req, res) => {
@@ -125,40 +183,81 @@ app.post('/api/categories', (req, res) => {
   res.json({ id: info.lastInsertRowid })
 })
 
+app.patch('/api/categories/:id', (req, res) => {
+  if ('track' in req.body) db.prepare('UPDATE categories SET track = ? WHERE id = ?').run(req.body.track ? 1 : 0, Number(req.params.id))
+  res.json({ ok: true })
+})
+
 app.get('/api/transactions', (req, res) => {
   const where: string[] = []
   const params: (string | number)[] = []
   if (req.query.month) { where.push('substr(t.date, 1, 7) = ?'); params.push(String(req.query.month)) }
-  if (req.query.category) { where.push('t.category_id = ?'); params.push(Number(req.query.category)) }
+  if (req.query.category) {
+    where.push('(t.category_id = ? OR EXISTS (SELECT 1 FROM splits s WHERE s.transaction_id = t.id AND s.category_id = ?))')
+    params.push(Number(req.query.category), Number(req.query.category))
+  }
   if (req.query.account) { where.push('t.account_id = ?'); params.push(String(req.query.account)) }
-  if (req.query.q) { where.push('(t.name LIKE ? OR t.merchant LIKE ?)'); params.push(`%${req.query.q}%`, `%${req.query.q}%`) }
-  res.json(db.prepare(`
-    SELECT t.id, t.date, t.name, t.merchant, t.amount, t.pending, t.category_id, t.category_source, a.name AS account_name
+  if (req.query.q) {
+    where.push('(t.name LIKE ? OR t.merchant LIKE ? OR t.notes LIKE ?)')
+    params.push(`%${req.query.q}%`, `%${req.query.q}%`, `%${req.query.q}%`)
+  }
+  const rows = db.prepare(`
+    SELECT t.id, t.date, t.name, t.merchant, t.amount, t.pending, t.category_id, t.category_source, t.notes, a.name AS account_name
     FROM transactions t LEFT JOIN accounts a ON a.id = t.account_id
     ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
-    ORDER BY t.date DESC, t.id LIMIT 1000`).all(...params))
+    ORDER BY t.date DESC, t.id LIMIT 1000`).all(...params) as any[]
+  const splits = new Map<string, unknown[]>()
+  for (const s of db.prepare('SELECT id, transaction_id, amount, category_id FROM splits ORDER BY id').all() as any[]) {
+    if (!splits.has(s.transaction_id)) splits.set(s.transaction_id, [])
+    splits.get(s.transaction_id)!.push(s)
+  }
+  res.json(rows.map((r) => ({ ...r, splits: splits.get(r.id) ?? [] })))
 })
 
 app.patch('/api/transactions/:id', (req, res) => {
-  const categoryId = Number(req.body.category_id)
-  db.prepare(`UPDATE transactions SET category_id = ?, category_source = 'user' WHERE id = ?`).run(categoryId, req.params.id)
+  const id = req.params.id
+  if ('notes' in req.body) db.prepare('UPDATE transactions SET notes = ? WHERE id = ?').run(String(req.body.notes ?? '').trim() || null, id)
   let alsoUpdated = 0
-  if (req.body.remember) {
-    const t = db.prepare('SELECT COALESCE(merchant, name) AS label FROM transactions WHERE id = ?').get(req.params.id) as { label: string }
-    const pattern = t.label.toLowerCase()
-    db.prepare('INSERT OR REPLACE INTO rules (pattern, category_id) VALUES (?, ?)').run(pattern, categoryId)
-    alsoUpdated = Number(db.prepare(`
-      UPDATE transactions SET category_id = ?, category_source = 'rule'
-      WHERE lower(COALESCE(merchant, name)) = ? AND category_source != 'user'`).run(categoryId, pattern).changes)
+  if (req.body.category_id != null) {
+    const categoryId = Number(req.body.category_id)
+    db.prepare(`UPDATE transactions SET category_id = ?, category_source = 'user' WHERE id = ?`).run(categoryId, id)
+    if (req.body.remember) {
+      const t = db.prepare('SELECT COALESCE(merchant, name) AS label FROM transactions WHERE id = ?').get(id) as { label: string }
+      const pattern = t.label.toLowerCase()
+      db.prepare('INSERT OR REPLACE INTO rules (pattern, category_id) VALUES (?, ?)').run(pattern, categoryId)
+      alsoUpdated = Number(db.prepare(`
+        UPDATE transactions SET category_id = ?, category_source = 'rule'
+        WHERE lower(COALESCE(merchant, name)) = ? AND category_source != 'user'`).run(categoryId, pattern).changes)
+    }
   }
   res.json({ ok: true, alsoUpdated })
 })
 
-const budgetRows = (month: string) => db.prepare(`
-  SELECT c.id, c.name, c.kind, COALESCE(b.amount, 0) AS budget,
-    COALESCE((SELECT SUM(t.amount) FROM transactions t WHERE t.category_id = c.id AND substr(t.date, 1, 7) = ?), 0) AS spent
-  FROM categories c LEFT JOIN budgets b ON b.category_id = c.id
-  ORDER BY c.kind, c.name`).all(month) as { id: number; name: string; kind: string; budget: number; spent: number }[]
+// Replace a transaction's split parts; an empty list removes the split.
+app.put('/api/transactions/:id/splits', (req, res) => {
+  const id = req.params.id
+  const t = db.prepare('SELECT amount, pending FROM transactions WHERE id = ?').get(id) as { amount: number; pending: number } | undefined
+  if (!t) return res.status(404).json({ error: 'No such transaction' })
+  const parts = (Array.isArray(req.body.splits) ? req.body.splits : []).map((p: any) => ({
+    category_id: Number(p.category_id),
+    amount: Math.round(Number(p.amount) * 100) / 100,
+  })) as { category_id: number; amount: number }[]
+  if (parts.length) {
+    if (t.pending) return res.status(400).json({ error: "Pending transactions can't be split until they post." })
+    if (parts.length < 2 || parts.some((p) => !p.category_id || !p.amount || Math.sign(p.amount) !== Math.sign(t.amount))) {
+      return res.status(400).json({ error: 'A split needs at least two parts, each with a category and an amount.' })
+    }
+    const total = Math.round(parts.reduce((s, p) => s + p.amount, 0) * 100) / 100
+    if (Math.abs(total - t.amount) > 0.005) return res.status(400).json({ error: `Parts add up to ${total.toFixed(2)}, not ${t.amount.toFixed(2)}.` })
+  }
+  db.exec('BEGIN')
+  db.prepare('DELETE FROM splits WHERE transaction_id = ?').run(id)
+  const insert = db.prepare('INSERT INTO splits (transaction_id, amount, category_id) VALUES (?, ?, ?)')
+  for (const p of parts) insert.run(id, p.amount, p.category_id)
+  if (parts.length) db.prepare(`UPDATE transactions SET category_source = 'user' WHERE id = ?`).run(id)
+  db.exec('COMMIT')
+  res.json({ ok: true })
+})
 
 // Merchant rules created from the "remember" prompt in the Transactions tab.
 app.get('/api/rules', (_req, res) => {
@@ -181,12 +280,77 @@ app.put('/api/budget/:categoryId', (req, res) => {
   res.json({ ok: true })
 })
 
+// Sets a target for every expense category that has none, from its 3-month
+// average rounded up to the next $10. Existing targets are left alone.
+app.post('/api/budget/fill', (req, res) => {
+  const put = db.prepare('INSERT OR REPLACE INTO budgets (category_id, amount) VALUES (?, ?)')
+  let filled = 0
+  for (const r of budgetRows(String(req.body.month || currentMonth()))) {
+    if (r.kind !== 'expense' || r.budget > 0 || r.avg3 <= 0) continue
+    put.run(r.id, Math.ceil(r.avg3 / 10) * 10)
+    filled++
+  }
+  res.json({ filled })
+})
+
 app.get('/api/networth', (_req, res) => {
   res.json(db.prepare(`
     SELECT date,
       SUM(CASE WHEN balance > 0 THEN balance ELSE 0 END) AS assets,
       SUM(CASE WHEN balance < 0 THEN -balance ELSE 0 END) AS debts
     FROM balance_snapshots GROUP BY date ORDER BY date`).all())
+})
+
+// Income vs spending per month. Card charges count as spending when made; card
+// payments are transfers. debtEnd is total owed at the month's last snapshot.
+app.get('/api/cashflow', (req, res) => {
+  const months = Math.min(24, Number(req.query.months) || 12)
+  const from = addMonths(currentMonth(), -(months - 1))
+  const flows = db.prepare(`
+    SELECT substr(l.date, 1, 7) AS month,
+      ROUND(-SUM(CASE WHEN c.kind = 'income' THEN l.amount ELSE 0 END), 2) AS income,
+      ROUND(SUM(CASE WHEN c.kind = 'expense' THEN l.amount ELSE 0 END), 2) AS spending,
+      ROUND(SUM(CASE WHEN c.name = 'Debt Payments' THEN l.amount ELSE 0 END), 2) AS debtPayments
+    FROM ledger l JOIN categories c ON c.id = l.category_id
+    WHERE l.pending = 0 AND substr(l.date, 1, 7) >= ?
+    GROUP BY 1 ORDER BY 1`).all(from) as any[]
+  const debt = db.prepare(`
+    SELECT substr(s.date, 1, 7) AS month, SUM(CASE WHEN s.balance < 0 THEN -s.balance ELSE 0 END) AS owed
+    FROM balance_snapshots s
+    WHERE s.date = (SELECT MAX(date) FROM balance_snapshots WHERE substr(date, 1, 7) = substr(s.date, 1, 7))
+    GROUP BY 1`).all() as { month: string; owed: number }[]
+  const owed = new Map(debt.map((d) => [d.month, d.owed]))
+  res.json(flows.map((f) => ({ ...f, net: Math.round((f.income - f.spending) * 100) / 100, debtEnd: owed.get(f.month) ?? null })))
+})
+
+// Running totals for categories marked "track" (e.g. Legal).
+app.get('/api/tracked', (req, res) => {
+  const month = String(req.query.month || currentMonth())
+  res.json(db.prepare(`
+    SELECT c.id, c.name, ROUND(SUM(l.amount), 2) AS total, MIN(l.date) AS since,
+      ROUND(SUM(CASE WHEN substr(l.date, 1, 7) = ? THEN l.amount ELSE 0 END), 2) AS thisMonth
+    FROM categories c JOIN ledger l ON l.category_id = c.id
+    WHERE c.track = 1 AND l.pending = 0
+    GROUP BY c.id ORDER BY c.name`).all(month))
+})
+
+app.get('/api/recurring', (_req, res) => {
+  res.json(detectRecurring())
+})
+
+app.get('/api/debts', (_req, res) => {
+  res.json(debtSummary())
+})
+
+// For the Daily Briefing add-on: ?generate=1 creates today's text if missing.
+app.get('/api/briefing', async (req, res) => {
+  let briefing = cachedBriefing()
+  if (!briefing && req.query.generate && (await aiAvailable())) briefing = await generateBriefing()
+  res.json({ briefing, data: briefingData() })
+})
+
+app.post('/api/briefing', async (_req, res) => {
+  res.json({ briefing: await generateBriefing() })
 })
 
 // Compact snapshot for the Daily Briefing add-on and other HA consumers.
@@ -197,6 +361,7 @@ app.get('/api/summary', (_req, res) => {
   const accounts = db.prepare('SELECT name, org_name, type, balance, balance_date FROM accounts ORDER BY type, name').all() as any[]
   const assets = accounts.reduce((s, a) => s + Math.max(0, a.balance ?? 0), 0)
   const debts = accounts.reduce((s, a) => s + Math.max(0, -(a.balance ?? 0)), 0)
+  const in7 = new Date(Date.parse(today()) + 7 * 86400000).toISOString().slice(0, 10)
   res.json({
     asOf: meta.get('last_sync'),
     month,
@@ -211,9 +376,14 @@ app.get('/api/summary', (_req, res) => {
     accounts,
     recent: db.prepare(`
       SELECT t.date, COALESCE(t.merchant, t.name) AS description, t.amount, c.name AS category, a.name AS account
-      FROM transactions t LEFT JOIN categories c ON c.id = t.category_id LEFT JOIN accounts a ON a.id = t.account_id
+      FROM ledger t LEFT JOIN categories c ON c.id = t.category_id LEFT JOIN accounts a ON a.id = t.account_id
       WHERE t.amount > 0 ORDER BY t.date DESC, t.amount DESC LIMIT 10`).all(),
     insight: (db.prepare('SELECT content FROM insights WHERE month = ?').get(month) as { content: string } | undefined)?.content ?? null,
+    upcoming: detectRecurring()
+      .filter((r) => !r.stopped && r.nextDate >= today() && r.nextDate <= in7)
+      .map((r) => ({ merchant: r.merchant, amount: r.amount, due: r.nextDate })),
+    issues: syncHealth().issues,
+    briefing: cachedBriefing()?.text ?? null,
   })
 })
 
@@ -248,14 +418,27 @@ app.listen(config.port, host, () => {
   console.log(`Budget app listening on http://${host}:${config.port} (SimpleFIN: ${isConnected() ? 'connected' : 'not connected'}, Claude model: ${config.claudeModel})`)
 })
 
-// SimpleFIN allows roughly 24 requests a day; one scheduled sync per day,
-// run at startup only if the last one is stale.
-const DAY_MS = 24 * 60 * 60 * 1000
-function scheduledSync() {
-  if (!isConnected()) return
-  syncAndCategorize().catch((err) => console.error('Scheduled sync failed:', err.message))
+function backup() {
+  try {
+    console.log(`Backed up database to ${backupDb()}`)
+  } catch (err: any) {
+    console.error('Backup failed:', err.message)
+  }
 }
-setInterval(scheduledSync, DAY_MS)
+
+// Once a day: sync (SimpleFIN allows ~24 requests a day), write the daily
+// briefing, then back up. At startup, only the parts that are overdue run.
+const DAY_MS = 24 * 60 * 60 * 1000
+const overdue = (key: string) => {
+  const last = meta.get(key)
+  return !last || Date.now() - Date.parse(last) > 20 * 60 * 60 * 1000
+}
+async function dailyJob() {
+  if (isConnected()) await syncAndCategorize().catch((err) => console.error('Scheduled sync failed:', err.message))
+  if (await aiAvailable()) await generateBriefing().catch((err) => console.error('Briefing failed:', err.message))
+  backup()
+}
+setInterval(dailyJob, DAY_MS)
 async function startup() {
   if (!isConnected() && config.simplefinSetupToken) {
     try {
@@ -265,7 +448,7 @@ async function startup() {
       console.error('SimpleFIN setup token claim failed:', err.message)
     }
   }
-  const last = meta.get('last_sync')
-  if (!last || Date.now() - new Date(last).getTime() > 20 * 60 * 60 * 1000) scheduledSync()
+  if (overdue('last_sync')) await dailyJob()
+  else if (overdue('last_backup')) backup()
 }
 startup()

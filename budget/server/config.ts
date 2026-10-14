@@ -19,6 +19,9 @@ export const config = {
   isAddon,
   port: Number(process.env.PORT || 8099),
   dataDir: isAddon ? '/data' : path.resolve(APP_DIR, process.env.DATA_DIR || './data'),
+  // Nightly database copies. In the add-on, /config is the add-on's own config
+  // folder (addon_config map), which survives a wipe of /data.
+  backupDir: isAddon ? '/config/backups' : path.resolve(APP_DIR, process.env.DATA_DIR || './data', 'backups'),
   // One-time setup token from bridge.simplefin.org; claimed on first start.
   simplefinSetupToken: pick('simplefin_setup_token', 'SIMPLEFIN_SETUP_TOKEN'),
   // Already-claimed access URL, if you prefer to supply it directly.

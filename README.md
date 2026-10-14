@@ -9,7 +9,17 @@ Home Assistant add-on: personal budgeting with SimpleFIN bank sync and Claude Co
 3. Open Budget → Accounts:
    - paste a setup token from [bridge.simplefin.org](https://bridge.simplefin.org) and click Connect;
    - click **Connect Claude**, open the link, approve, paste the code back;
-   - add a manual account for anything SimpleFIN can't reach (e.g. a mortgage servicer).
+   - add a manual account for anything SimpleFIN can't reach (e.g. a mortgage servicer), and import its history with **Import CSV**.
+
+## What it does
+
+- **Dashboard**: today's check ("anything to flag?"), spend vs budget with last-month comparison, tracked categories with running totals, monthly cash flow, net worth.
+- **Transactions**: AI categories, merchant rules, notes, and splits (one Costco trip into groceries + pharmacy).
+- **Budget**: monthly targets, 3-month averages, one-click fill from averages.
+- **Recurring**: detected bills and subscriptions, monthly total, price increases, ones that may have stopped.
+- **Debt**: current payoff pace per account and an avalanche vs snowball plan with extra payments.
+- **Health**: warns when an account stops updating or a sync fails.
+- **Backups**: the database is copied nightly to the add-on's config folder (`/addon_configs/<id>_budget/backups`, last 7 kept) and restored automatically if the add-on starts with empty data. The SimpleFIN connection is not backed up; reconnect with a new setup token after a reinstall.
 
 ## Options
 
@@ -22,7 +32,10 @@ Home Assistant add-on: personal budgeting with SimpleFIN bank sync and Claude Co
 
 ## For other add-ons
 
-`GET /api/summary` returns net worth, this month's spend vs budget, over-budget categories, balances and recent charges as JSON. Send `Authorization: Bearer <api_token>`.
+Send `Authorization: Bearer <api_token>` (not needed through ingress).
+
+- `GET /api/summary`: net worth, this month's spend vs budget, over-budget categories, balances, recent charges, bills due in the next 7 days, connection issues and today's briefing text.
+- `GET /api/briefing?generate=1`: today's "anything to flag?" text (generated through Claude if it hasn't been yet today) plus the data behind it.
 
 ## Development
 
