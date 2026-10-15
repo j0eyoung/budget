@@ -144,45 +144,76 @@ app.delete('/api/accounts/:id', (req, res) => {
   res.json({ ok: true })
 })
 
-// CSV rows arrive already parsed by the browser: {date: 'YYYY-MM-DD', description, amount}
-// with amount > 0 = money out. Ids are derived from the row contents, so
-// importing the same file twice adds nothing the second time.
+// Rows from a bank's CSV or QFX/OFX export arrive parsed by the browser:
+// {date: 'YYYY-MM-DD', description, amount} with amount > 0 = money out.
+// A row is skipped when bank sync already covers its date (SimpleFIN accounts
+// keep their synced rows), or when the account already has a transaction with
+// that date and amount, so overlapping files, or a CSV and a QFX of the same
+// period, add nothing twice. dryRun only counts, for the preview.
 app.post('/api/accounts/:id/import', (req, res) => {
   const accountId = req.params.id
-  if (!db.prepare('SELECT 1 FROM accounts WHERE id = ?').get(accountId)) return res.status(404).json({ error: 'No such account' })
+  const account = db.prepare('SELECT source FROM accounts WHERE id = ?').get(accountId) as { source: string } | undefined
+  if (!account) return res.status(404).json({ error: 'No such account' })
   const rows = Array.isArray(req.body.rows) ? req.body.rows : []
+  const syncedFrom = account.source === 'simplefin'
+    ? (db.prepare(`SELECT MIN(date) AS d FROM transactions WHERE account_id = ? AND pending = 0 AND id NOT LIKE 'csv-%'`).get(accountId) as { d: string | null }).d
+    : null
+  const sameDayAmount = new Map<string, number>()
+  for (const t of db.prepare('SELECT date, amount FROM transactions WHERE account_id = ? AND pending = 0').all(accountId) as { date: string; amount: number }[]) {
+    const key = `${t.date}|${t.amount.toFixed(2)}`
+    sameDayAmount.set(key, (sameDayAmount.get(key) ?? 0) + 1)
+  }
+  const inFile = new Map<string, number>()
+  const fresh: { id: string; date: string; description: string; amount: number }[] = []
+  let invalid = 0
+  let covered = 0
+  let duplicates = 0
+  for (const r of rows) {
+    const date = String(r.date ?? '')
+    const description = String(r.description ?? '').trim().slice(0, 200)
+    const amount = Math.round(Number(r.amount) * 100) / 100
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !description || !Number.isFinite(amount) || amount === 0) {
+      invalid++
+      continue
+    }
+    if (syncedFrom && date >= syncedFrom) {
+      covered++
+      continue
+    }
+    // The nth identical date+amount in the file is new only if the account has fewer than n.
+    const key = `${date}|${amount.toFixed(2)}`
+    const n = (inFile.get(key) ?? 0) + 1
+    inFile.set(key, n)
+    if (n <= (sameDayAmount.get(key) ?? 0)) {
+      duplicates++
+      continue
+    }
+    const id = `csv-${crypto.createHash('sha1').update(`${accountId}|${key}|${description}|${n}`).digest('hex').slice(0, 24)}`
+    fresh.push({ id, date, description, amount })
+  }
+  const span = fresh.map((f) => f.date).sort()
+  const counts = { duplicates, covered, invalid, syncedFrom, from: span[0] ?? null, to: span.at(-1) ?? null }
+  if (req.body.dryRun) return res.json({ added: fresh.length, ...counts })
+
   const rule = db.prepare('SELECT category_id FROM rules WHERE pattern = ?')
   const insert = db.prepare(`
     INSERT OR IGNORE INTO transactions (id, account_id, date, name, merchant, amount, pending, category_id, category_source)
     VALUES (?, ?, ?, ?, NULL, ?, 0, ?, ?)`)
   const fallback = categoryIdByName('Other')
-  const seen = new Map<string, number>()
   let added = 0
-  let invalid = 0
   db.exec('BEGIN')
   try {
-    for (const r of rows) {
-      const date = String(r.date ?? '')
-      const description = String(r.description ?? '').trim()
-      const amount = Math.round(Number(r.amount) * 100) / 100
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !description || !Number.isFinite(amount) || amount === 0) {
-        invalid++
-        continue
-      }
-      const key = `${accountId}|${date}|${amount}|${description}`
-      const n = (seen.get(key) ?? 0) + 1
-      seen.set(key, n)
-      const id = `csv-${crypto.createHash('sha1').update(`${key}|${n}`).digest('hex').slice(0, 24)}`
-      const hit = rule.get(description.toLowerCase()) as { category_id: number } | undefined
-      added += Number(insert.run(id, accountId, date, description, amount, hit?.category_id ?? fallback, hit ? 'rule' : 'none').changes)
+    for (const f of fresh) {
+      const hit = rule.get(f.description.toLowerCase()) as { category_id: number } | undefined
+      added += Number(insert.run(f.id, accountId, f.date, f.description, f.amount, hit?.category_id ?? fallback, hit ? 'rule' : 'none').changes)
     }
     db.exec('COMMIT')
   } catch (err) {
     db.exec('ROLLBACK')
     throw err
   }
-  categorizeWithAi().catch((err) => console.error('Categorizing imported rows failed:', err.message))
-  res.json({ added, duplicates: rows.length - added - invalid, invalid })
+  categorizeWithAi(Math.max(200, added)).catch((err) => console.error('Categorizing imported rows failed:', err.message))
+  res.json({ added, ...counts })
 })
 
 app.get('/api/categories', (_req, res) => {

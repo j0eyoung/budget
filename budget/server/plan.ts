@@ -7,7 +7,7 @@ import type { Context, Goal, Income, Plan, PlanDebt, PlanEvent, PlanState, Raise
 import { askClaude } from './claude.ts'
 import { db, meta } from './db.ts'
 import { debtSummary } from './debts.ts'
-import { currentMonth, today } from './queries.ts'
+import { currentMonth, historyStart, today } from './queries.ts'
 import { normalize } from './recurring.ts'
 
 // The payoff-and-savings plan: an income schedule (paychecks, bonuses,
@@ -115,7 +115,7 @@ function detectedIncome(h = incomeHistory()): Income {
 // actually been: the last full month, and the average of the last three
 // months the history fully covers.
 function spendingHistory(): { average: number | null; lastMonth: { month: string; amount: number } | null } {
-  const first = (db.prepare('SELECT MIN(date) AS d FROM transactions WHERE pending = 0').get() as { d: string | null }).d
+  const first = historyStart()
   const months = first ? [1, 2, 3].map((n) => addMonths(currentMonth(), -n)).filter((m) => `${m}-01` >= first) : []
   if (!months.length) return { average: null, lastMonth: null }
   const totals = new Map((db.prepare(`
@@ -385,7 +385,7 @@ export function planReport() {
 // month so far. "Left" is income minus spending: what was available for debt
 // payments and savings. Debt paid is payments minus new charges on the plan's debts.
 function planVsActual(plan: Plan, spending: number, debtIds: string[]) {
-  const first = (db.prepare('SELECT MIN(date) AS d FROM transactions WHERE pending = 0').get() as { d: string | null }).d
+  const first = historyStart()
   if (!first) return []
   const month = currentMonth()
   const months = [5, 4, 3, 2, 1, 0].map((n) => addMonths(month, -n)).filter((m) => `${m}-01` >= first || m === month)

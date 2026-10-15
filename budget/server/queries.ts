@@ -8,6 +8,18 @@ export function addMonths(month: string, n: number): string {
   return new Date(Date.UTC(y, m - 1 + n, 1)).toISOString().slice(0, 7)
 }
 
+// The first day every regularly used spending account (checking, cards) has
+// history for. An imported file can reach further back for one account than
+// bank sync does for the rest, so averages only count months all of them cover.
+export function historyStart(): string | null {
+  const row = db.prepare(`
+    SELECT MAX(first) AS d FROM (
+      SELECT MIN(t.date) AS first FROM transactions t JOIN accounts a ON a.id = t.account_id
+      WHERE t.pending = 0 AND a.type IN ('depository', 'credit')
+      GROUP BY t.account_id HAVING COUNT(*) >= 10)`).get() as { d: string | null }
+  return row.d ?? (db.prepare('SELECT MIN(date) AS d FROM transactions WHERE pending = 0').get() as { d: string | null }).d
+}
+
 export type BudgetRow = {
   id: number
   name: string
@@ -23,7 +35,7 @@ export type BudgetRow = {
 // comparison. Only months the synced history fully covers count toward the
 // average, so a partial first month doesn't drag it down.
 export function budgetRows(month: string): BudgetRow[] {
-  const first = (db.prepare('SELECT MIN(date) AS d FROM transactions WHERE pending = 0').get() as { d: string | null }).d
+  const first = historyStart()
   const candidates = [1, 2, 3].map((n) => addMonths(month, -n))
   let avgMonths = first ? candidates.filter((m) => `${m}-01` >= first) : []
   if (!avgMonths.length && first) avgMonths = candidates.filter((m) => m >= first.slice(0, 7))

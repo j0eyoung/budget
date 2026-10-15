@@ -593,6 +593,8 @@ function Accounts({ status, onError, onStatus }: PageProps & { status: Status | 
         </p>
       </section>
 
+      <CsvImport accounts={accounts} onError={onError} onDone={load} />
+
       {groups.map(([org, list]) => (
         <section key={org}>
           <h2>{org}</h2>
@@ -634,8 +636,6 @@ function Accounts({ status, onError, onStatus }: PageProps & { status: Status | 
           <button onClick={addManual} disabled={!manual.name.trim() || Boolean(busy)}>Add</button>
         </div>
       </section>
-
-      <CsvImport accounts={accounts} onError={onError} onDone={load} />
     </>
   )
 }
