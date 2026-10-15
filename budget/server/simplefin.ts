@@ -36,7 +36,7 @@ function accessRequest(): { base: string; headers: Record<string, string> } {
   return { base: url.toString().replace(/\/$/, ''), headers: { Authorization: `Basic ${auth}` } }
 }
 
-type SfTransaction = { id: string; posted: number; amount: string; description?: string; payee?: string; memo?: string; pending?: boolean }
+type SfTransaction = { id: string; posted: number; transacted_at?: number; amount: string; description?: string; payee?: string; memo?: string; pending?: boolean }
 type SfAccount = {
   id: string
   org: { name?: string; domain?: string }
@@ -59,6 +59,8 @@ function guessType(a: SfAccount): string {
 }
 
 const dateOf = (unix: number) => new Date(unix * 1000).toISOString().slice(0, 10)
+// Pending transactions arrive with posted = 0; use when they happened, or today.
+const txDate = (t: SfTransaction) => dateOf(t.posted > 0 ? t.posted : t.transacted_at || Date.now() / 1000)
 
 export async function syncSimpleFin(): Promise<{ added: number; errors: string[] }> {
   const { base, headers } = accessRequest()
@@ -103,7 +105,7 @@ export async function syncSimpleFin(): Promise<{ added: number; errors: string[]
         const label = t.payee || t.description || ''
         const ruleHit = rule.get(label.toLowerCase()) as { category_id: number } | undefined
         const isNew = !txExists.get(t.id)
-        insertTx.run(t.id, a.id, dateOf(t.posted), t.description ?? label, t.payee ?? null,
+        insertTx.run(t.id, a.id, txDate(t), t.description ?? label, t.payee ?? null,
           -Number(t.amount), t.pending ? 1 : 0, ruleHit?.category_id ?? fallback, ruleHit ? 'rule' : 'none')
         if (isNew && !t.pending) added++
       }

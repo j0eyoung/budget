@@ -48,7 +48,7 @@ const median = (xs: number[]) => {
   const mid = Math.floor(s.length / 2)
   return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2
 }
-const normalize = (label: string) =>
+export const normalize = (label: string) =>
   label.toLowerCase().replace(/#?\d{3,}/g, ' ').replace(/[^a-z0-9&' ]+/g, ' ').replace(/\s+/g, ' ').trim()
 
 export function detectRecurring(): Recurring[] {

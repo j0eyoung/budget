@@ -110,6 +110,9 @@ function addColumn(table: string, column: string, definition: string): boolean {
 addColumn('accounts', 'apr', 'REAL')
 addColumn('accounts', 'min_payment', 'REAL')
 addColumn('accounts', 'in_plan', 'INTEGER NOT NULL DEFAULT 1')
+// Promotional rate (e.g. 0% on a card) that applies until promo_end (YYYY-MM-DD).
+addColumn('accounts', 'promo_apr', 'REAL')
+addColumn('accounts', 'promo_end', 'TEXT')
 // Tracked categories get their own running-total card on the dashboard.
 const trackAdded = addColumn('categories', 'track', 'INTEGER NOT NULL DEFAULT 0')
 
@@ -209,8 +212,8 @@ ledger(id, transaction_id, account_id, date 'YYYY-MM-DD', name, merchant, amount
   amount > 0 is money spent/leaving the account; amount < 0 is money received (income, refunds).
 transactions(id, account_id, date, name, merchant, amount, pending, category_id, category_source, notes)  raw rows; split parents still appear here.
 splits(id, transaction_id, amount, category_id)  parts of a split transaction.
-accounts(id, source, org_name, name, type, balance, available, currency, balance_date, apr, min_payment, in_plan)
-  type is depository | credit | loan | investment | other. balance is signed: negative means money owed (credit cards, loans, mortgage). apr is percent.
+accounts(id, source, org_name, name, type, balance, available, currency, balance_date, apr, min_payment, in_plan, promo_apr, promo_end)
+  type is depository | credit | loan | investment | other. balance is signed: negative means money owed (credit cards, loans, mortgage). apr is percent; promo_apr applies until promo_end.
 categories(id, name, kind, track)  kind is expense | income | savings | transfer. Only kind='expense' counts as spending. 'savings' is pre-tax 401k/HSA contributions and investment activity (dividends, sweeps) inside investment accounts.
 budgets(category_id, amount)  monthly target per category.
 balance_snapshots(date, account_id, balance)  one row per account per day synced (signed like accounts.balance).`

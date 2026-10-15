@@ -1,9 +1,11 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import { addMonths, api, dollars, money, monthLabel, thisMonth } from './api.ts'
 import type { BudgetRow, Category, Status, Transaction } from './api.ts'
+import { Card } from './Card.tsx'
 import { CashFlow } from './CashFlow.tsx'
 import { CsvImport } from './CsvImport.tsx'
 import { DebtPage } from './Debt.tsx'
+import { PlanPage, PlanStrip } from './Plan.tsx'
 import { RecurringPage } from './Recurring.tsx'
 import { photoToJpeg } from './photo.ts'
 import { SplitEditor } from './SplitEditor.tsx'
@@ -11,7 +13,7 @@ import type { Proposal } from './SplitEditor.tsx'
 
 const CADENCES = ['weekly', 'every 2 weeks', 'twice a month', 'monthly', 'quarterly', 'yearly']
 
-const TABS = ['Dashboard', 'Transactions', 'Budget', 'Recurring', 'Debt', 'Accounts', 'Ask'] as const
+const TABS = ['Dashboard', 'Transactions', 'Budget', 'Recurring', 'Debt', 'Plan', 'Accounts', 'Ask'] as const
 type Tab = (typeof TABS)[number]
 
 export function App() {
@@ -48,11 +50,12 @@ export function App() {
         </div>
       )}
       <main>
-        {tab === 'Dashboard' && <Dashboard month={month} status={status} onError={setError} />}
+        {tab === 'Dashboard' && <Dashboard month={month} status={status} onError={setError} onOpenPlan={() => setTab('Plan')} />}
         {tab === 'Transactions' && <Transactions month={month} onError={setError} />}
         {tab === 'Budget' && <Budget month={month} onError={setError} />}
         {tab === 'Recurring' && <RecurringPage onError={setError} />}
         {tab === 'Debt' && <DebtPage onError={setError} />}
+        {tab === 'Plan' && <PlanPage status={status} onError={setError} />}
         {tab === 'Accounts' && <Accounts status={status} onError={setError} onStatus={loadStatus} />}
         {tab === 'Ask' && <Ask status={status} onError={setError} />}
       </main>
@@ -63,7 +66,7 @@ export function App() {
 type PageProps = { onError: (message: string) => void }
 type Tracked = { id: number; name: string; total: number; since: string; thisMonth: number }
 
-function Dashboard({ month, status, onError }: PageProps & { month: string; status: Status | null }) {
+function Dashboard({ month, status, onError, onOpenPlan }: PageProps & { month: string; status: Status | null; onOpenPlan: () => void }) {
   const [rows, setRows] = useState<BudgetRow[]>([])
   const [worth, setWorth] = useState<{ date: string; assets: number; debts: number }[]>([])
   const [tracked, setTracked] = useState<Tracked[]>([])
@@ -98,6 +101,7 @@ function Dashboard({ month, status, onError }: PageProps & { month: string; stat
   return (
     <>
       {month === thisMonth() && <Today status={status} onError={onError} />}
+      {month === thisMonth() && <PlanStrip onError={onError} onOpen={onOpenPlan} />}
       <div className="cards">
         <Card label="Spent" value={money(spent)} sub={`${budgeted ? `of ${money(budgeted)} budgeted · ` : ''}${dollars(prevSpent)} last month`} />
         <Card label="Income" value={money(income)} sub={`${money(income - spent)} net`} />
@@ -169,16 +173,6 @@ function Today({ status, onError }: PageProps & { status: Status | null }) {
       </div>
       {text ? <p className="insight">{text}</p> : <p className="muted">Not checked yet today.</p>}
     </section>
-  )
-}
-
-function Card({ label, value, sub }: { label: string; value: string; sub: string }) {
-  return (
-    <div className="card">
-      <div className="muted">{label}</div>
-      <div className="big">{value}</div>
-      <div className="muted">{sub}</div>
-    </div>
   )
 }
 

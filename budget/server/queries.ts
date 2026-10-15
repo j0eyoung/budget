@@ -23,7 +23,7 @@ export type BudgetRow = {
 // comparison. Only months the synced history fully covers count toward the
 // average, so a partial first month doesn't drag it down.
 export function budgetRows(month: string): BudgetRow[] {
-  const first = (db.prepare('SELECT MIN(date) AS d FROM transactions').get() as { d: string | null }).d
+  const first = (db.prepare('SELECT MIN(date) AS d FROM transactions WHERE pending = 0').get() as { d: string | null }).d
   const candidates = [1, 2, 3].map((n) => addMonths(month, -n))
   let avgMonths = first ? candidates.filter((m) => `${m}-01` >= first) : []
   if (!avgMonths.length && first) avgMonths = candidates.filter((m) => m >= first.slice(0, 7))

@@ -8,6 +8,7 @@ import { config } from './config.ts'
 import { backupDb, categoryIdByName, db, meta, runReadOnly } from './db.ts'
 import { debtSummary } from './debts.ts'
 import { syncHealth } from './health.ts'
+import { importPlan, planBrief, planDebtOrder, planReport, resetPlan, savePlan } from './plan.ts'
 import { addMonths, budgetRows, currentMonth, today } from './queries.ts'
 import { readReceipt } from './receipt.ts'
 import { CADENCES, clearRecurringOverride, detectRecurring, ignoredRecurring, setRecurringOverride } from './recurring.ts'
@@ -107,19 +108,29 @@ app.post('/api/accounts', (req, res) => {
   res.json({ id })
 })
 
-app.patch('/api/accounts/:id', (req, res) => {
-  const id = req.params.id
+// Shared by the account PATCH and the plan save (which carries debt terms).
+function updateAccount(id: string, body: Record<string, unknown>): boolean {
   const account = db.prepare('SELECT source FROM accounts WHERE id = ?').get(id) as { source: string } | undefined
-  if (!account) return res.status(404).json({ error: 'No such account' })
-  if (ACCOUNT_TYPES.includes(req.body.type)) db.prepare('UPDATE accounts SET type = ? WHERE id = ?').run(req.body.type, id)
-  if ('apr' in req.body) db.prepare('UPDATE accounts SET apr = ? WHERE id = ?').run(optionalNumber(req.body.apr), id)
-  if ('min_payment' in req.body) db.prepare('UPDATE accounts SET min_payment = ? WHERE id = ?').run(optionalNumber(req.body.min_payment), id)
-  if ('in_plan' in req.body) db.prepare('UPDATE accounts SET in_plan = ? WHERE id = ?').run(req.body.in_plan ? 1 : 0, id)
-  if (account.source === 'manual' && req.body.balance != null) {
-    const balance = Number(req.body.balance) || 0
+  if (!account) return false
+  if (ACCOUNT_TYPES.includes(body.type as string)) db.prepare('UPDATE accounts SET type = ? WHERE id = ?').run(body.type as string, id)
+  if ('apr' in body) db.prepare('UPDATE accounts SET apr = ? WHERE id = ?').run(optionalNumber(body.apr), id)
+  if ('min_payment' in body) db.prepare('UPDATE accounts SET min_payment = ? WHERE id = ?').run(optionalNumber(body.min_payment), id)
+  if ('in_plan' in body) db.prepare('UPDATE accounts SET in_plan = ? WHERE id = ?').run(body.in_plan ? 1 : 0, id)
+  if ('promo_apr' in body) db.prepare('UPDATE accounts SET promo_apr = ? WHERE id = ?').run(optionalNumber(body.promo_apr), id)
+  if ('promo_end' in body) {
+    const end = typeof body.promo_end === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(body.promo_end) ? body.promo_end : null
+    db.prepare('UPDATE accounts SET promo_end = ? WHERE id = ?').run(end, id)
+  }
+  if (account.source === 'manual' && body.balance != null) {
+    const balance = Number(body.balance) || 0
     db.prepare('UPDATE accounts SET balance = ?, balance_date = ?, updated_at = ? WHERE id = ?').run(balance, today(), new Date().toISOString(), id)
     db.prepare('INSERT OR REPLACE INTO balance_snapshots (date, account_id, balance) VALUES (?, ?, ?)').run(today(), id, balance)
   }
+  return true
+}
+
+app.patch('/api/accounts/:id', (req, res) => {
+  if (!updateAccount(req.params.id, req.body ?? {})) return res.status(404).json({ error: 'No such account' })
   res.json({ ok: true })
 })
 
@@ -360,8 +371,37 @@ app.delete('/api/recurring/:key', (req, res) => {
   res.json({ ok: true })
 })
 
+// plan_rank: position in the saved plan's payoff order (null if not in it).
 app.get('/api/debts', (_req, res) => {
-  res.json(debtSummary())
+  const order = planDebtOrder()
+  res.json(debtSummary().map((d) => ({ ...d, plan_rank: order.includes(d.id) ? order.indexOf(d.id) : null })))
+})
+
+app.get('/api/plan', (_req, res) => {
+  res.json(planReport())
+})
+
+// Body: {plan, debts?: [{id, apr, promo_apr, promo_end, min_payment}]}.
+app.put('/api/plan', (req, res) => {
+  savePlan(req.body?.plan)
+  const terms = Array.isArray(req.body?.debts) ? req.body.debts : []
+  for (const t of terms) {
+    if (typeof t?.id !== 'string') continue
+    const { apr, promo_apr, promo_end, min_payment } = t
+    updateAccount(t.id, { apr, promo_apr, promo_end, min_payment })
+  }
+  res.json(planReport())
+})
+
+app.delete('/api/plan', (_req, res) => {
+  resetPlan()
+  res.json(planReport())
+})
+
+// Reads a written plan with Claude and returns it as plan settings for the
+// editor to show; nothing is saved until the user saves.
+app.post('/api/plan/import', async (req, res) => {
+  res.json(await importPlan(String(req.body?.text ?? '')))
 })
 
 // For the Daily Briefing add-on: ?generate=1 creates today's text if missing.
@@ -406,6 +446,7 @@ app.get('/api/summary', (_req, res) => {
       .map((r) => ({ merchant: r.merchant, amount: r.amount, due: r.nextDate })),
     issues: syncHealth().issues,
     briefing: cachedBriefing()?.text ?? null,
+    plan: planBrief(),
   })
 })
 

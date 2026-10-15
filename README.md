@@ -17,7 +17,8 @@ Home Assistant add-on: personal budgeting with SimpleFIN bank sync and Claude Co
 - **Transactions**: AI categories, merchant rules, notes, and splits (one Costco trip into groceries + pharmacy). **receipt** takes a photo of the receipt; Claude groups the items by category and the split editor opens prefilled for you to confirm. The photo isn't stored.
 - **Budget**: monthly targets, 3-month averages, one-click fill from averages.
 - **Recurring**: detected bills and subscriptions, monthly total, price increases, ones that may have stopped. Change how often, mark one as not recurring (with undo), or add a missed one with **recurring** on its transaction.
-- **Debt**: current payoff pace per account and an avalanche vs snowball plan with extra payments.
+- **Debt**: current payoff pace per account, promo rates (e.g. 0% until a date), and avalanche vs snowball vs your plan's order with extra payments. Warns when an order wouldn't clear a promo balance in time.
+- **Plan**: your payoff-and-savings plan. Income schedule (paychecks, bonuses, raises, side income), planned spending, one-off and monthly changes, and goals in order: debts to pay off, then savings goals (an emergency fund, a project with cost items). It projects month by month from today's balances: when each goal lands, whether it's on track for its date, and how much per month it needs or can spare. Plan vs actual shows each month's income, spending and debt paydown against the plan, and it flags new charges on the card you're paying off. **Import a written plan** reads a plan (e.g. a handoff from another AI chat) into the editor through Claude, for you to check before saving.
 - **Health**: warns when an account stops updating or a sync fails.
 - **Backups**: the database is copied nightly to the add-on's config folder (`/addon_configs/<id>_budget/backups`, last 7 kept) and restored automatically if the add-on starts with empty data. The SimpleFIN connection is not backed up; reconnect with a new setup token after a reinstall.
 
@@ -34,7 +35,7 @@ Home Assistant add-on: personal budgeting with SimpleFIN bank sync and Claude Co
 
 Send `Authorization: Bearer <api_token>` (not needed through ingress).
 
-- `GET /api/summary`: net worth, this month's spend vs budget, over-budget categories, balances, recent charges, bills due in the next 7 days, connection issues and today's briefing text.
+- `GET /api/summary`: net worth, this month's spend vs budget, over-budget categories, balances, recent charges, bills due in the next 7 days, connection issues, today's briefing text, and the plan (debt-free date, next milestones, the card being paid off, warnings).
 - `GET /api/briefing?generate=1`: today's "anything to flag?" text (generated through Claude if it hasn't been yet today) plus the data behind it.
 
 ## Development

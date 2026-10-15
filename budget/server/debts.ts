@@ -8,7 +8,7 @@ const DAY = 86400000
 // charges and interest, i.e. how much the balance actually drops.
 export function debtSummary() {
   const accounts = db.prepare(`
-    SELECT id, name, org_name, type, source, balance, apr, min_payment, in_plan
+    SELECT id, name, org_name, type, source, balance, apr, min_payment, in_plan, promo_apr, promo_end
     FROM accounts WHERE balance < 0 AND type IN ('credit', 'loan', 'other') ORDER BY balance`).all() as any[]
   const firstTx = db.prepare('SELECT MIN(date) AS d FROM transactions WHERE account_id = ? AND pending = 0')
   const flows = db.prepare(`
@@ -39,6 +39,8 @@ export function debtSummary() {
       apr: a.apr,
       min_payment: a.min_payment,
       in_plan: Boolean(a.in_plan),
+      promo_apr: a.promo_apr as number | null,
+      promo_end: a.promo_end as string | null,
       payments_per_month: payments,
       paydown_per_month: paydown,
       history_days: days,
