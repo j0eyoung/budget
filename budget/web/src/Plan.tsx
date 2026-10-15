@@ -1,28 +1,19 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { goalMonth, monthsBetween, project } from '../../shared/plan-math.ts'
+import type { Context, Goal, GoalItem, Income, MonthRow, Plan, PlanEvent, PlanState, Projection, Raise, Schedule } from '../../shared/plan-math.ts'
 import { api, dollars, money, monthLabel } from './api.ts'
 import type { Status } from './api.ts'
-import { Card } from './Card.tsx'
 
-// Mirrors server/plan.ts.
-type Schedule = 'weekly' | 'biweekly' | 'semimonthly' | 'monthly'
-type Raise = { month: string; paycheck: number; bonus: number | null }
-type Income = { paycheck: number; schedule: Schedule; lastPayday: string; bonus: number; bonusMonths: number[]; side: number; raises: Raise[] }
-type PlanEvent = { month: string; label: string; amount: number; monthly: boolean }
-type GoalItem = { name: string; low: number; high: number; actual: number | null; done: boolean }
-type Goal = { id: string; kind: 'debt' | 'savings'; name: string; accountId: string | null; target: number | null; by: string | null; items: GoalItem[] }
-type Plan = { income: Income; spending: number | null; events: PlanEvent[]; goals: Goal[] }
+// Shapes from server/plan.ts (planReport).
 type GoalStatus = Goal & {
   account: string | null
   now: number
-  projected: string | null
-  atActual?: string | null
+  deadline: string | null // target date, or the promo deadline if sooner
+  projected: string | null // at the planned spending
   status: 'done' | 'on track' | 'behind' | 'no date' | 'not reachable' | 'no account'
   perMonth: number | null
+  limit: number | null // most monthly spending that still makes the deadline
   cost: { low: number; high: number; actual: number; done: number } | null
-}
-type MonthRow = {
-  month: string; income: number; spending: number; minimums: number; interest: number; toDebt: number; toSavings: number
-  drawn: number; borrowed: number; debtLeft: number; saved: number; spare: number; notes: string[]
 }
 type Pair = { plan: number; actual: number }
 type PlanActual = { month: string; partial: boolean; income: Pair; spending: Pair; left: Pair; debtPaid: number | null }
@@ -35,16 +26,17 @@ type Report = {
   saved: boolean
   plan: Plan
   detected: { income: Income; spending: number | null }
-  spending: { planned: number; actual: number | null; usingActual: boolean }
+  spending: { planned: number; actual: number | null; lastMonth: { month: string; amount: number } | null; usingActual: boolean }
+  ceiling: number | null // most monthly spending that makes every deadline
+  debtFree: string | null
   accounts: Account[]
   debtTerms: DebtTerm[]
   goals: GoalStatus[]
-  promos: { id: string; name: string; promoApr: number; promoEnd: string; deadline: string; projected: string | null; ok: boolean; perMonth: number | null }[]
+  promos: { id: string; name: string; short: string; promoApr: number; promoEnd: string; deadline: string; projected: string | null; ok: boolean }[]
   focus: { accountId: string; name: string; goal: string; type: string; owed: number; chargesThisMonth: number; count: number; recent: { date: string; merchant: string; amount: number }[] } | null
   windfalls: { date: string; amount: number; kind: string; sendTo: string | null }[]
   warnings: string[]
-  debtFree: { plan: string | null; actual?: string | null }
-  months: MonthRow[]
+  model: { state: PlanState; ctx: Context }
   actual: PlanActual[]
 }
 type OnError = (message: string) => void
@@ -55,16 +47,14 @@ const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Se
 
 const when = (m: string | null | undefined) => (m ? monthLabel(m) : 'not in 10 yrs')
 
-function StatusChip({ g }: { g: GoalStatus }) {
-  const tone = g.status === 'done' || g.status === 'on track' ? 'ok' : g.status === 'behind' || g.status === 'not reachable' ? 'bad' : ''
-  return <span className={`status ${tone}`}>{g.status}</span>
-}
-
-function perMonthText(g: GoalStatus): string {
-  if (g.perMonth == null) return ''
-  if (g.perMonth > 0) return `needs ${dollars(g.perMonth)}/mo more`
-  if (g.perMonth <= -5000) return '$5,000+/mo to spare'
-  return g.perMonth === 0 ? 'no room to spare' : `${dollars(-g.perMonth)}/mo to spare`
+// On time / late for a goal, given the month it's reached at some spending level.
+function timing(g: GoalStatus, reached: string | null): { label: string; tone: string } {
+  if (g.status === 'done') return { label: 'done', tone: 'ok' }
+  if (!reached) return { label: 'never at this spending', tone: 'bad' }
+  if (!g.deadline) return { label: 'no target date', tone: '' }
+  const late = monthsBetween(g.deadline, reached)
+  if (late > 0) return { label: `${late} mo late`, tone: 'bad' }
+  return { label: late < 0 ? `on time, ${-late} mo early` : 'on time', tone: 'ok' }
 }
 
 function Windfalls({ report }: { report: Report }) {
@@ -79,31 +69,48 @@ function Windfalls({ report }: { report: Report }) {
   )
 }
 
-// Dashboard summary: the next milestones and new charges on the card being paid off.
+function FocusCharges({ report }: { report: Report }) {
+  const f = report.focus
+  if (f?.type !== 'credit' || !f.count) return null
+  return (
+    <p className="over small">
+      {money(f.chargesThisMonth)} of new charges on {f.name} this month ({f.count}). That's the card you're paying off, so these push its payoff later.
+    </p>
+  )
+}
+
+// Dashboard summary: the spending limit and the next payoff dates.
 export function PlanStrip({ onError, onOpen }: { onError: OnError; onOpen: () => void }) {
   const [report, setReport] = useState<Report | null>(null)
   useEffect(() => {
     api<Report>('plan').then(setReport).catch((e) => onError(e.message))
   }, [onError])
-  if (!report?.goals.length) return null
+  if (!report || !report.goals.some((g) => g.deadline)) return null
   const next = report.goals.filter((g) => g.status !== 'done').slice(0, 3)
-  const focus = report.focus
+  const last = report.spending.lastMonth
   return (
     <section>
       <div className="chart-head">
-        <h2>Plan <span className="muted">debt-free {when(report.debtFree.plan)}</span></h2>
+        <h2>Payoff plan</h2>
         <button onClick={onOpen}>Open plan</button>
       </div>
       <Windfalls report={report} />
-      {next.map((g) => (
-        <div className="account" key={g.id}>
-          <div>{g.name}<div className="muted">{when(g.projected)}{g.by ? ` · target ${monthLabel(g.by)}` : ''}</div></div>
-          <div className="right"><StatusChip g={g} /><div className="muted">{perMonthText(g)}</div></div>
-        </div>
-      ))}
-      {focus?.type === 'credit' && focus.count > 0 && (
-        <p className="over small">{money(focus.chargesThisMonth)} of new charges on {focus.name} this month, the card you're paying off.</p>
+      {report.ceiling != null && (
+        <p className="plan-limit">
+          Spend under <strong>{dollars(report.ceiling)}/mo</strong> to make every payoff date.
+          {last ? <span className="muted"> {monthLabel(last.month, false)}: {dollars(last.amount)}</span> : null}
+        </p>
       )}
+      {next.map((g) => {
+        const t = timing(g, g.projected)
+        return (
+          <div className="account" key={g.id}>
+            <div>{g.name}<div className="muted">{when(g.projected)}{g.deadline ? ` · target ${monthLabel(g.deadline)}` : ''}</div></div>
+            <div className="right"><span className={`status ${t.tone}`}>{t.label}</span></div>
+          </div>
+        )
+      })}
+      <FocusCharges report={report} />
     </section>
   )
 }
@@ -111,112 +118,198 @@ export function PlanStrip({ onError, onOpen }: { onError: OnError; onOpen: () =>
 export function PlanPage({ status, onError }: { status: Status | null; onError: OnError }) {
   const [report, setReport] = useState<Report | null>(null)
   const [editing, setEditing] = useState(false)
+  const [spend, setSpend] = useState<number | null>(null) // slider; null = the plan's spending
   const load = useCallback(() => {
     api<Report>('plan').then(setReport).catch((e) => onError(e.message))
   }, [onError])
   useEffect(load, [load])
 
-  // Ticking a cost item done or entering what it cost saves straight away.
-  const updateItem = async (goalId: string, index: number, patch: Partial<GoalItem>) => {
-    if (!report) return
-    const plan = {
-      ...report.plan,
-      goals: report.plan.goals.map((g) => (g.id === goalId ? { ...g, items: g.items.map((it, i) => (i === index ? { ...it, ...patch } : it)) } : g)),
-    }
+  const s = spend ?? report?.spending.planned ?? 0
+  const projection = useMemo(() => (report ? project(report.plan, report.model.state, report.model.ctx, s) : null), [report, s])
+
+  const savePlan = async (plan: Plan) => {
     try {
       setReport(await api<Report>('plan', 'PUT', { plan }))
     } catch (e: any) {
       onError(e.message)
     }
   }
-
+  const setGoal = (id: string, patch: Partial<Goal>) => report && savePlan({ ...report.plan, goals: report.plan.goals.map((g) => (g.id === id ? { ...g, ...patch } : g)) })
+  // Ticking a cost item done or entering what it cost saves straight away.
+  const updateItem = (goalId: string, index: number, patch: Partial<GoalItem>) => {
+    const g = report?.plan.goals.find((x) => x.id === goalId)
+    if (g) setGoal(goalId, { items: g.items.map((it, i) => (i === index ? { ...it, ...patch } : it)) })
+  }
   const edit = (on: boolean) => {
     setEditing(on)
     window.scrollTo(0, 0)
   }
 
-  if (!report) return <section><p className="muted">Loading the plan…</p></section>
+  if (!report || !projection) return <section><p className="muted">Loading the plan…</p></section>
   if (editing) {
-    return <PlanEditor report={report} aiReady={Boolean(status?.aiConfigured)} onError={onError} onDone={(r) => { if (r) setReport(r); edit(false) }} />
+    return <PlanEditor report={report} aiReady={Boolean(status?.aiConfigured)} onError={onError} onDone={(r) => { if (r) { setReport(r); setSpend(null) } edit(false) }} />
   }
-  const { goals, focus, spending } = report
+
+  const { goals, spending } = report
+  const last = spending.lastMonth
+  const debtGoals = goals.filter((g) => g.kind === 'debt')
+  const savingsGoals = goals.filter((g) => g.kind === 'savings')
+  const hasDeadlines = goals.some((g) => g.deadline)
+  const presets = [
+    last && { label: `${monthLabel(last.month, false)} actual`, value: last.amount },
+    spending.actual != null && { label: '3-month average', value: spending.actual },
+    report.ceiling != null && { label: 'Makes every date', value: report.ceiling },
+    report.plan.spending != null && { label: 'Your plan', value: report.plan.spending },
+  ].filter((p): p is { label: string; value: number } => Boolean(p))
+  const values = [s, ...presets.map((p) => p.value)]
+  const lo = Math.max(0, Math.floor((Math.min(...values) * 0.6) / 100) * 100)
+  const hi = Math.ceil((Math.max(...values) * 1.25) / 100) * 100
+  const next = projection.rows[1] ?? projection.rows[0]
+  const left = next.income - next.spending - next.minimums
+  const aiming = report.model.state.debts.find((d) => d.balance > 0)?.short ?? 'savings'
+  const noApr = report.model.state.debts.filter((d) => d.aprMissing)
+
   return (
     <>
       {!report.saved && (
         <div className="notice">
-          This is a starting point from your accounts: debts highest rate first, then a 6-month emergency fund. Set your own order, dates and income, or import a written plan.{' '}
-          <button onClick={() => edit(true)}>Set up your plan</button>
+          This is a starting point built from your accounts. Put a target date on each debt below, or use <strong>Edit plan</strong> to import a written plan
+          and set your income, raises and bonuses.
         </div>
       )}
-      <div className="cards">
-        <Card label="Debt-free" value={when(report.debtFree.plan)}
-          sub={report.debtFree.actual !== undefined ? `${when(report.debtFree.actual)} at your actual spending` : 'at the planned spending'} />
-        <Card label="Planned spending" value={`${dollars(spending.planned)}/mo`}
-          sub={spending.actual == null ? 'no full month of history yet' : spending.usingActual ? 'your 3-month average (no target set)' : `actual 3-month average ${dollars(spending.actual)}/mo`} />
-        {focus && (
-          <Card label="Paying off now" value={focus.name}
-            sub={`${money(focus.owed)} left${focus.type === 'credit' ? ` · ${focus.count ? `${dollars(focus.chargesThisMonth)} new charges this month` : 'no new charges this month'}` : ''}`} />
-        )}
-      </div>
       <Windfalls report={report} />
-      {report.warnings.length > 0 && (
-        <div className="notice warn">
-          <strong>⚠ Plan check</strong>
-          <ul>{report.warnings.map((w) => <li key={w}>{w}</li>)}</ul>
+
+      <section className="plan-hero">
+        {report.ceiling != null ? (
+          <>
+            <div className="muted">To make every payoff date, keep monthly spending under</div>
+            <div className="hero-number">{dollars(report.ceiling)}<span>/mo</span></div>
+          </>
+        ) : hasDeadlines ? (
+          <div className="hero-text">Some target dates are too soon to make at any spending level. Move them later below.</div>
+        ) : (
+          <div className="hero-text">Give your debts target dates below to see how much you can spend each month and still make them.</div>
+        )}
+        <div className="muted">
+          {last ? `In ${monthLabel(last.month, false)} you spent ${dollars(last.amount)}` : ''}
+          {spending.actual != null ? `${last ? '; ' : ''}the 3-month average is ${dollars(spending.actual)}` : ''}
+          {last || spending.actual != null ? '. ' : ''}
+          Spending means everything except loan and credit card payments, mortgage included.
         </div>
-      )}
+      </section>
 
       <section>
         <div className="chart-head">
-          <h2>Milestones</h2>
+          <h2>Try a spending level</h2>
+          {report.plan.spending !== s && <button onClick={() => savePlan({ ...report.plan, spending: s })}>Use {dollars(s)}/mo as my plan</button>}
+        </div>
+        <div className="slider">
+          <input type="range" min={lo} max={hi} step={50} value={s} onChange={(e) => setSpend(Number(e.target.value))} aria-label="Monthly spending" />
+          <strong>{dollars(s)}/mo</strong>
+        </div>
+        <div className="chips">
+          {presets.map((p) => (
+            <button key={p.label} className={`toggle ${Math.abs(p.value - s) < 25 ? 'on' : ''}`} onClick={() => setSpend(p.value)}>
+              {p.label}: {dollars(p.value)}
+            </button>
+          ))}
+        </div>
+        <p className="math">
+          {monthLabel(next.month, false)}: income {dollars(next.income)} − spending {dollars(next.spending)} − minimum payments {dollars(next.minimums)} ={' '}
+          {left >= 0
+            ? <strong className="inflow">{dollars(left)} extra toward {aiming}</strong>
+            : <strong className="over">{dollars(-left)} short</strong>}
+        </p>
+        {left < 0 && <p className="over small">At this level the month comes up short, so the gap lands on a card and balances grow instead of shrinking.</p>}
+        <p className="muted">Debt-free: <strong>{when(projection.debtFree)}</strong> at {dollars(s)}/mo.</p>
+      </section>
+
+      <section>
+        <div className="chart-head">
+          <h2>Payoff dates <span className="muted">at {dollars(s)}/mo</span></h2>
           <button onClick={() => edit(true)}>Edit plan</button>
         </div>
-        <div className="table-wrap">
-          <table className="plan-table">
-            <thead>
-              <tr>
-                <th>Goal</th><th className="num">Now</th><th className="num opt">Target</th><th className="when">By</th>
-                <th className="when">Projected</th><th className="status-col">Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {goals.map((g, i) => (
-                <tr key={g.id}>
-                  <td title={g.account ?? ''}>
-                    {i + 1}. {g.name}
-                    <div className="muted">{g.account ?? (g.kind === 'debt' ? 'no account picked' : 'not linked to an account')}</div>
-                  </td>
-                  <td className="num">{money(g.now)}<div className="muted">{g.kind === 'debt' ? 'owed' : 'saved'}</div></td>
-                  <td className="num opt">{g.kind === 'savings' && g.target != null ? dollars(g.target) : '—'}</td>
-                  <td className="when">{g.by ? monthLabel(g.by) : '—'}</td>
-                  <td className="when">
-                    {g.status === 'done' ? 'done' : when(g.projected)}
-                    {g.atActual !== undefined && g.status !== 'done' && <div className="muted">{when(g.atActual)} at actual</div>}
-                  </td>
-                  <td className="status-col"><StatusChip g={g} /><div className="muted">{perMonthText(g)}</div></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        {report.promos.filter((p) => p.ok).map((p) => (
-          <p className="muted" key={p.id}>
-            {p.name}: {p.promoApr}% until {p.promoEnd}, so it has to be gone by {monthLabel(p.deadline)}. On pace for {when(p.projected)}.
-          </p>
-        ))}
+        <GoalTable goals={debtGoals} projection={projection} report={report} onTarget={(id, by) => setGoal(id, { by })} />
+        <FocusCharges report={report} />
+        {noApr.length > 0 && <p className="muted">No APR entered for {noApr.map((d) => d.short).join(', ')}, so it counts as 0% (after any promo). Add it in the Debt tab.</p>}
         <p className="muted">
-          Debts are paid off top to bottom, then savings goals fill top to bottom (goals on the same account stack). Projections start from today's
-          balances at the planned spending, so they move with every sync. "To spare" is how much less you could put in each month and still make the date.
+          Debts are paid off top to bottom: minimums on all of them, everything left over on the top one. "OK up to" is the most you can spend per month and still
+          make that date. A promo balance has to be gone the month before its promo ends.
         </p>
       </section>
+
+      {savingsGoals.length > 0 && (
+        <section>
+          <h2>Savings goals <span className="muted">after the debts, at {dollars(s)}/mo</span></h2>
+          <GoalTable goals={savingsGoals} projection={projection} report={report} onTarget={(id, by) => setGoal(id, { by })} />
+        </section>
+      )}
 
       {goals.filter((g) => g.items.length > 0).map((g) => (
         <CostItems key={g.id} goal={g} onChange={(i, patch) => updateItem(g.id, i, patch)} />
       ))}
       <PlanVsActual rows={report.actual} />
-      <MonthByMonth rows={report.months} />
+      <MonthByMonth rows={visibleMonths(projection, goals)} />
     </>
   )
+}
+
+function GoalTable({ goals, projection, report, onTarget }: {
+  goals: GoalStatus[]
+  projection: Projection
+  report: Report
+  onTarget: (id: string, by: string | null) => void
+}) {
+  const debt = goals[0]?.kind === 'debt'
+  return (
+    <div className="table-wrap">
+      <table className="plan-table">
+        <thead>
+          <tr>
+            <th>{debt ? 'Debt' : 'Goal'}</th><th className="num">{debt ? 'Owed' : 'Saved'}</th>
+            <th className="when">Target date</th><th className="when">{debt ? 'Paid off' : 'Reached'}</th><th className="status-col">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {goals.map((g, i) => {
+            const reached = g.status === 'done' ? null : goalMonth(g, projection)
+            const t = timing(g, reached)
+            const promo = report.promos.find((p) => p.id === g.accountId)
+            return (
+              <tr key={g.id}>
+                <td title={g.account ?? ''}>
+                  {i + 1}. {g.name}
+                  <div className="muted">
+                    {g.account ?? (debt ? 'no account picked' : 'not linked to an account')}
+                    {promo ? ` · ${promo.promoApr}% until ${promo.promoEnd}` : ''}
+                    {!debt && g.target != null ? ` · target ${dollars(g.target)}` : ''}
+                  </div>
+                </td>
+                <td className="num">{money(g.now)}</td>
+                <td className="when">
+                  <input type="month" value={g.by ?? ''} onChange={(e) => onTarget(g.id, e.target.value || null)} aria-label={`Target date for ${g.name}`} />
+                  {g.deadline && g.deadline !== g.by && <div className="muted">promo: by {monthLabel(g.deadline)}</div>}
+                </td>
+                <td className="when">{g.status === 'done' ? 'done' : when(reached)}</td>
+                <td className="status-col">
+                  <span className={`status ${t.tone}`}>{t.label}</span>
+                  {g.limit != null && <div className="muted">OK up to {dollars(g.limit)}/mo</div>}
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+// Months up to the last milestone, plus a few after.
+function visibleMonths(p: Projection, goals: GoalStatus[]): MonthRow[] {
+  const milestones = [p.debtFree, ...goals.map((g) => goalMonth(g, p))].filter((m): m is string => Boolean(m))
+  if (!milestones.length) return p.rows.slice(0, 36)
+  const last = milestones.reduce((a, b) => (b > a ? b : a))
+  return p.rows.slice(0, Math.min(120, Math.max(12, monthsBetween(p.rows[0].month, last) + 4)))
 }
 
 function CostItems({ goal, onChange }: { goal: GoalStatus; onChange: (index: number, patch: Partial<GoalItem>) => void }) {

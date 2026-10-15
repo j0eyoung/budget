@@ -198,8 +198,19 @@ input.small { width: 84px; }
 .status.bad { border-color: var(--bad); color: var(--bad); }
 .notice.good { border-color: var(--good); }
 .plan-table td, .pva-table td, .items-table td { vertical-align: top; white-space: normal; }
-.plan-table th.when, .plan-table td.when { width: 130px; }
-.plan-table th.status-col, .plan-table td.status-col { width: 180px; }
+.plan-table th.when, .plan-table td.when { width: 160px; }
+.plan-table td.when input { width: 100%; padding: 3px 6px; }
+.plan-table th.status-col, .plan-table td.status-col { width: 190px; }
+.plan-hero { text-align: center; padding: 22px 16px; }
+.hero-number { font-size: 40px; font-weight: 700; font-variant-numeric: tabular-nums; margin: 2px 0 6px; }
+.hero-number span { font-size: 18px; font-weight: 500; color: var(--muted); }
+.hero-text { font-size: 17px; font-weight: 600; margin-bottom: 8px; }
+.slider { display: flex; align-items: center; gap: 14px; margin-bottom: 10px; }
+.slider input[type='range'] { flex: 1; padding: 0; border: none; background: none; accent-color: var(--accent); }
+.slider strong { min-width: 96px; text-align: right; font-size: 18px; font-variant-numeric: tabular-nums; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.math { font-variant-numeric: tabular-nums; margin: 0 0 6px; }
+.plan-limit { margin: 0 0 6px; }
 .items-table input.amount { width: 100px; }
 .items-table th.done-col, .items-table td.done-col { width: 64px; text-align: center; }
 .months-table th.notes, .months-table td.notes { width: 28%; }
@@ -233,8 +244,9 @@ table.form-table { table-layout: auto; width: auto; max-width: 100%; }
 .goal-edit select { max-width: 280px; }
 .items-edit { padding-left: 22px; }
 @media (max-width: 800px) {
-  .plan-table th.when, .plan-table td.when { width: 92px; }
+  .plan-table th.when, .plan-table td.when { width: 120px; }
   .plan-table th.status-col, .plan-table td.status-col { width: 116px; white-space: normal; }
+  .hero-number { font-size: 32px; }
   .only-narrow { display: block; }
   .months-table th.notes, .months-table td.notes { width: 34%; }
   .items-edit { padding-left: 0; }

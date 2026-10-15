@@ -23,7 +23,7 @@ Personal budgeting app: Node 24 server (TypeScript run directly, no build step) 
 - `GET /api/summary` and `GET /api/briefing` are the contract for the Daily Briefing add-on; only add fields, never rename or remove.
 - The Claude CLI never gets tools or file access. Receipt photos go in as a stream-json image block (`askClaudeWithImage`), are resized in the browser first, and are never stored.
 - Schema changes go through `addColumn` in [budget/server/db.ts](budget/server/db.ts) so existing databases (and restored backups) migrate on start.
-- [budget/shared/payoff.ts](budget/shared/payoff.ts) (debt payoff math) is imported by both the server and the browser, so it stays plain TypeScript with no Node or DOM imports.
+- [budget/shared/payoff.ts](budget/shared/payoff.ts) (debt payoff math) and [budget/shared/plan-math.ts](budget/shared/plan-math.ts) (the Plan's month-by-month projection and spending limit) are imported by both the server and the browser (the Plan tab's spending slider reruns the projection live), so they stay plain TypeScript with no Node or DOM imports.
 - The Plan ([budget/server/plan.ts](budget/server/plan.ts)) projects from real balances and the income schedule; "spending" there means expense categories except Debt Payments, because loan payments are modeled as debts. Keep that definition the same in the projection, the actual average and plan vs actual.
 
 ## Analyzing the user's finances

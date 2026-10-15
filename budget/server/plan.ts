@@ -1,6 +1,9 @@
 import crypto from 'node:crypto'
-import { accrueAndPayMinimums, addMonths, estimateMinimum, payExtra, promoDeadline } from '../shared/payoff.ts'
-import type { DebtState } from '../shared/payoff.ts'
+import { addMonths, estimateMinimum, promoDeadline } from '../shared/payoff.ts'
+import {
+  SCHEDULES, deadlineGoals, eventsIn, goalDeadline, goalDone, goalMonth, maxSpending, meetsDeadline, project, scheduledPay,
+} from '../shared/plan-math.ts'
+import type { Context, Goal, Income, Plan, PlanDebt, PlanEvent, PlanState, Raise, Schedule } from '../shared/plan-math.ts'
 import { askClaude } from './claude.ts'
 import { db, meta } from './db.ts'
 import { debtSummary } from './debts.ts'
@@ -10,26 +13,9 @@ import { normalize } from './recurring.ts'
 // The payoff-and-savings plan: an income schedule (paychecks, bonuses,
 // raises, side income), planned monthly spending, one-off and monthly
 // changes, and goals in order (debts to pay off, then savings to fill). It is
-// one JSON document in meta 'plan'. The projection runs month by month from
-// today's real balances, so it moves every time the accounts sync.
+// one JSON document in meta 'plan'. The projection (shared/plan-math.ts) runs
+// month by month from today's real balances, so it moves with every sync.
 
-export type Raise = { month: string; paycheck: number; bonus: number | null }
-export const SCHEDULES = ['weekly', 'biweekly', 'semimonthly', 'monthly'] as const
-export type Schedule = (typeof SCHEDULES)[number]
-export type Income = {
-  paycheck: number // net, per paycheck
-  schedule: Schedule // biweekly = every 14 days; semimonthly = twice a month
-  lastPayday: string // any real payday; weekly and biweekly schedules count from it
-  bonus: number // net, per bonus
-  bonusMonths: number[] // 1-12
-  side: number // other monthly income
-  raises: Raise[] // new paycheck (and bonus) from a month on
-}
-export type PlanEvent = { month: string; label: string; amount: number; monthly: boolean } // amount > 0 = money in
-export type GoalItem = { name: string; low: number; high: number; actual: number | null; done: boolean }
-export type Goal = { id: string; kind: 'debt' | 'savings'; name: string; accountId: string | null; target: number | null; by: string | null; items: GoalItem[] }
-// spending: planned monthly spending excluding loan payments; null = use the actual average.
-export type Plan = { income: Income; spending: number | null; events: PlanEvent[]; goals: Goal[] }
 export type DebtTerms = { id: string; apr: number | null; promo_apr: number | null; promo_end: string | null; min_payment: number | null }
 
 const DAY = 86400000
@@ -125,18 +111,20 @@ function detectedIncome(h = incomeHistory()): Income {
   }
 }
 
-// Average monthly spending over the last three months the history fully
-// covers, without loan payments (the plan pays those as debts).
-function actualSpending(): number | null {
+// What spending (without loan payments, which the plan pays as debts) has
+// actually been: the last full month, and the average of the last three
+// months the history fully covers.
+function spendingHistory(): { average: number | null; lastMonth: { month: string; amount: number } | null } {
   const first = (db.prepare('SELECT MIN(date) AS d FROM transactions WHERE pending = 0').get() as { d: string | null }).d
-  if (!first) return null
-  const months = [1, 2, 3].map((n) => addMonths(currentMonth(), -n)).filter((m) => `${m}-01` >= first)
-  if (!months.length) return null
-  const row = db.prepare(`
-    SELECT COALESCE(SUM(l.amount), 0) AS total FROM ledger l JOIN categories c ON c.id = l.category_id
+  const months = first ? [1, 2, 3].map((n) => addMonths(currentMonth(), -n)).filter((m) => `${m}-01` >= first) : []
+  if (!months.length) return { average: null, lastMonth: null }
+  const totals = new Map((db.prepare(`
+    SELECT substr(l.date, 1, 7) AS month, SUM(l.amount) AS total FROM ledger l JOIN categories c ON c.id = l.category_id
     WHERE c.kind = 'expense' AND c.name != 'Debt Payments' AND l.pending = 0
-      AND substr(l.date, 1, 7) IN (${months.map(() => '?').join(', ')})`).get(...months) as { total: number }
-  return Math.round(row.total / months.length)
+      AND substr(l.date, 1, 7) IN (${months.map(() => '?').join(', ')})
+    GROUP BY 1`).all(...months) as { month: string; total: number }[]).map((r) => [r.month, r.total]))
+  const sum = months.reduce((s, m) => s + (totals.get(m) ?? 0), 0)
+  return { average: Math.round(sum / months.length), lastMonth: { month: months[0], amount: Math.round(totals.get(months[0]) ?? 0) } }
 }
 
 // ---- The plan document ----
@@ -195,7 +183,7 @@ function defaultPlan(): Plan {
   const debts = debtSummary().filter((d) => d.in_plan).sort((a, b) => (b.apr ?? 0) - (a.apr ?? 0) || a.owed - b.owed)
   const goals: Goal[] = debts.map((d) => ({ id: `debt-${d.id.replace(/[^\w-]/g, '').slice(-24)}`, kind: 'debt', name: `Pay off ${d.org_name || d.name}`, accountId: d.id, target: null, by: null, items: [] }))
   const savings = db.prepare(`SELECT id FROM accounts WHERE type = 'depository' AND name LIKE '%saving%' ORDER BY balance DESC LIMIT 1`).get() as { id: string } | undefined
-  const spending = actualSpending()
+  const spending = spendingHistory().average
   if (savings && spending) {
     goals.push({ id: 'emergency-fund', kind: 'savings', name: 'Emergency fund (6 months)', accountId: savings.id, target: Math.round((spending * 6) / 100) * 100, by: null, items: [] })
   }
@@ -228,45 +216,7 @@ export function planDebtOrder(): string[] {
   return saved ? plan.goals.filter((g) => g.kind === 'debt' && g.accountId).map((g) => g.accountId!) : []
 }
 
-// ---- Projection ----
-
-// How many paychecks land in a month.
-function paychecksIn(inc: Income, month: string): number {
-  if (inc.schedule === 'semimonthly') return 2
-  if (inc.schedule === 'monthly') return 1
-  const step = inc.schedule === 'weekly' ? 7 : 14
-  const start = dayNum(`${month}-01`)
-  const end = dayNum(`${addMonths(month, 1)}-01`) - 1
-  const anchor = dayNum(inc.lastPayday)
-  const first = anchor + Math.ceil((start - anchor) / step) * step
-  return first > end ? 0 : Math.floor((end - first) / step) + 1
-}
-
-const paycheckAt = (inc: Income, month: string) => inc.raises.filter((r) => r.month <= month).at(-1)?.paycheck ?? inc.paycheck
-const bonusAt = (inc: Income, month: string) => inc.raises.filter((r) => r.month <= month && r.bonus != null).at(-1)?.bonus ?? inc.bonus
-
-// The month's paychecks (minus `received` already in, for the current month)
-// plus a bonus in bonus months.
-function scheduledPay(inc: Income, month: string, received: number, bonusPaid: boolean): { amount: number; notes: string[] } {
-  const count = paychecksIn(inc, month)
-  const notes: string[] = []
-  if (count >= 3 && inc.schedule === 'biweekly') notes.push('3 paychecks')
-  if (inc.raises.some((r) => r.month === month)) notes.push('raise')
-  let amount = Math.max(0, count - received) * paycheckAt(inc, month)
-  const bonus = bonusAt(inc, month)
-  if (bonus > 0 && inc.bonusMonths.includes(Number(month.slice(5))) && !bonusPaid) {
-    amount += bonus
-    notes.push('bonus')
-  }
-  return { amount, notes }
-}
-
-const eventsIn = (plan: Plan, month: string, part: number) =>
-  plan.events.reduce((s, e) => s + (e.monthly ? (e.month <= month ? e.amount * part : 0) : e.month === month ? e.amount : 0), 0)
-
-type PlanDebt = DebtState & { label: string; short: string; aprMissing: boolean; minEstimated: boolean }
-type SavingsState = { id: string; name: string; target: number | null; saved: number }
-type PlanState = { debts: PlanDebt[]; savings: SavingsState[] }
+// ---- Projection inputs ----
 
 function planState(plan: Plan): PlanState {
   const date = today()
@@ -300,115 +250,6 @@ function planState(plan: Plan): PlanState {
   return { debts, savings }
 }
 
-export type MonthRow = {
-  month: string
-  income: number
-  spending: number
-  minimums: number
-  interest: number
-  toDebt: number
-  toSavings: number
-  drawn: number
-  borrowed: number
-  debtLeft: number
-  saved: number
-  spare: number
-  notes: string[]
-}
-type Projection = { rows: MonthRow[]; paidOff: Record<string, string>; reached: Record<string, string>; debtFree: string | null }
-type Context = { date: string; received: number; bonusPaid: boolean } // received: paychecks already in this month
-
-// Month by month from today (the rest of this month counts pro rata): income
-// minus spending minus minimums is what's left. It goes to the debts in plan
-// order, then fills savings goals in order; whatever is left after every goal
-// is spare. A short month is covered from spare cash, then savings (last goal
-// first), then a credit card.
-function project(plan: Plan, state: PlanState, ctx: Context, spending: number, extra = 0, horizon = 120): Projection {
-  const m0 = ctx.date.slice(0, 7)
-  const [y, m, d] = ctx.date.split('-').map(Number)
-  const daysInMonth = new Date(Date.UTC(y, m, 0)).getUTCDate()
-  const firstPart = (daysInMonth - d + 1) / daysInMonth
-  const debts = state.debts.map((x) => ({ ...x }))
-  const goals = state.savings.map((x) => ({ ...x }))
-  const paidOff: Record<string, string> = {}
-  const reached: Record<string, string> = {}
-  let debtFree: string | null = debts.length ? null : m0
-  let spare = 0
-  const rows: MonthRow[] = []
-  for (let k = 0; k < horizon; k++) {
-    const month = addMonths(m0, k)
-    const part = k === 0 ? firstPart : 1
-    const pay = scheduledPay(plan.income, month, k === 0 ? ctx.received : 0, k === 0 && ctx.bonusPaid)
-    const notes = [...pay.notes, ...plan.events.filter((e) => e.month === month).map((e) => e.label)]
-    const income = pay.amount + (plan.income.side + extra) * part + eventsIn(plan, month, part)
-    const spent = spending * part
-    const { interest, paid: minimums } = accrueAndPayMinimums(debts, month, part)
-    const cash = income - spent - minimums
-    let toDebt = 0
-    let toSavings = 0
-    let drawn = 0
-    let borrowed = 0
-    if (cash >= 0) {
-      let left = payExtra(debts, cash)
-      toDebt = cash - left
-      for (const g of goals) {
-        if (left <= 0) break
-        const put = Math.min(left, g.target == null ? left : Math.max(0, g.target - g.saved))
-        g.saved += put
-        left -= put
-        toSavings += put
-      }
-      spare += left
-    } else {
-      let need = -cash
-      const take = (available: number) => {
-        const t = Math.max(0, Math.min(available, need))
-        need -= t
-        drawn += t
-        return t
-      }
-      spare -= take(spare)
-      for (const g of [...goals].reverse()) g.saved -= take(g.saved)
-      if (need > 0) {
-        borrowed = need
-        const card = debts.find((x) => x.type === 'credit') ?? debts[0]
-        if (card) card.balance += need
-      }
-    }
-    for (const x of debts) {
-      if (x.balance > 0.005) {
-        delete paidOff[x.id]
-        continue
-      }
-      x.balance = 0
-      if (!paidOff[x.id]) {
-        paidOff[x.id] = month
-        notes.push(`✓ ${x.label}`)
-      }
-    }
-    for (const g of goals) {
-      if (g.target == null) continue
-      if (g.saved < g.target - 0.005) {
-        delete reached[g.id]
-        continue
-      }
-      if (!reached[g.id]) {
-        reached[g.id] = month
-        if (k > 0) notes.push(`✓ ${g.name}`)
-      }
-    }
-    if (debts.some((x) => x.balance > 0)) debtFree = null
-    else debtFree ??= month
-    const r = Math.round
-    rows.push({
-      month, income: r(income), spending: r(spent), minimums: r(minimums), interest: r(interest), toDebt: r(toDebt),
-      toSavings: r(toSavings), drawn: r(drawn), borrowed: r(borrowed),
-      debtLeft: r(debts.reduce((s, x) => s + x.balance, 0)), saved: r(goals.reduce((s, g) => s + g.saved, 0)), spare: r(spare), notes,
-    })
-  }
-  return { rows, paidOff, reached, debtFree }
-}
-
 // ---- Report ----
 
 export type GoalStatus = 'done' | 'on track' | 'behind' | 'no date' | 'not reachable' | 'no account'
@@ -424,29 +265,15 @@ export function planReport() {
     received: history.paychecks.filter((d) => d.date.startsWith(month)).length,
     bonusPaid: history.bonuses.some((d) => d.date.startsWith(month)),
   }
-  const actual = actualSpending()
-  const spending = plan.spending ?? actual ?? 0
-  const run = (extra = 0, s = spending) => project(plan, state, ctx, s, extra)
-  const base = run()
-  const atActual = plan.spending != null && actual != null && Math.abs(actual - plan.spending) >= 50 ? run(0, actual) : null
+  const spent = spendingHistory()
+  const spending = plan.spending ?? spent.average ?? 0
+  const base = project(plan, state, ctx, spending)
 
-  // Smallest change in monthly cash that still meets the test: positive =
-  // needed on top of the plan, negative = could be spared. null = not even
-  // with $15k/mo more.
-  const needed = (meets: (p: Projection) => boolean): number | null => {
-    let lo = -5000
-    let hi = 15000
-    if (!meets(run(hi))) return null
-    if (meets(run(lo))) return lo
-    for (let i = 0; i < 18; i++) {
-      const mid = (lo + hi) / 2
-      if (meets(run(mid))) hi = mid
-      else lo = mid
-    }
-    return Math.ceil(hi / 10) * 10
-  }
-  const reachedIn = (g: Goal, p: Projection): string | null =>
-    g.kind === 'debt' ? (g.accountId ? p.paidOff[g.accountId] ?? null : null) : p.reached[g.id] ?? null
+  // The most that can be spent each month while still making every
+  // deadline (target dates, and promo end dates), and each one on its own.
+  const deadlines = deadlineGoals(plan, state, date)
+  const ceiling = deadlines.length ? maxSpending(plan, state, ctx, (p) => deadlines.every((d) => meetsDeadline(d.goal, d.deadline)(p))) : null
+  const limits = new Map(deadlines.map((d) => [d.goal.id, maxSpending(plan, state, ctx, meetsDeadline(d.goal, d.deadline))]))
 
   const accounts = db.prepare('SELECT id, name, org_name, type, balance FROM accounts ORDER BY type, org_name, name').all() as
     { id: string; name: string; org_name: string | null; type: string; balance: number }[]
@@ -455,20 +282,18 @@ export function planReport() {
   const savingsById = new Map(state.savings.map((s) => [s.id, s]))
 
   const goals = plan.goals.map((g) => {
-    const debt = g.accountId ? debtById.get(g.accountId) : undefined
-    const now = g.kind === 'debt' ? debt?.balance ?? 0 : savingsById.get(g.id)?.saved ?? 0
-    const done = g.kind === 'debt' ? Boolean(g.accountId) && !debt : g.target != null && now >= g.target
-    const projected = done ? month : reachedIn(g, base)
+    const now = g.kind === 'debt' ? (g.accountId ? debtById.get(g.accountId)?.balance ?? 0 : 0) : savingsById.get(g.id)?.saved ?? 0
+    const done = goalDone(g, state)
+    const deadline = done ? null : goalDeadline(g, state, date)
+    const projected = done ? month : goalMonth(g, base)
+    const limit = limits.get(g.id) ?? null
     let status: GoalStatus
-    let perMonth: number | null = null
     if (done) status = 'done'
-    else if (!g.accountId && g.kind === 'debt') status = 'no account'
-    else if (!g.by) status = projected ? 'no date' : 'not reachable'
-    else {
-      const by = g.by
-      perMonth = needed((p) => (reachedIn(g, p) ?? '9999-12') <= by)
-      status = perMonth == null ? 'not reachable' : perMonth <= 0 ? 'on track' : 'behind'
-    }
+    else if (g.kind === 'debt' && !g.accountId) status = 'no account'
+    else if (!deadline) status = projected ? 'no date' : 'not reachable'
+    else status = limit == null ? 'not reachable' : spending <= limit ? 'on track' : 'behind'
+    // How much less would have to be spent each month to make it (negative = room to spare).
+    const perMonth = deadline && limit != null ? Math.round(spending - limit) : null
     const cost = g.items.length
       ? {
           low: g.items.reduce((s, i) => s + i.low, 0),
@@ -477,20 +302,13 @@ export function planReport() {
           done: g.items.filter((i) => i.done).length,
         }
       : null
-    return {
-      ...g, account: g.accountId ? accountName.get(g.accountId) ?? null : null, now: round(now), projected,
-      atActual: atActual ? (done ? month : reachedIn(g, atActual)) : undefined, status, perMonth, cost,
-    }
+    return { ...g, account: g.accountId ? accountName.get(g.accountId) ?? null : null, now: round(now), deadline, projected, status, perMonth, limit, cost }
   })
 
   const promos = state.debts.filter((d) => d.promoEnd && d.promoEnd > date).map((d) => {
     const deadline = promoDeadline(d.promoEnd!)
     const projected = base.paidOff[d.id] ?? null
-    const ok = projected != null && projected <= deadline
-    return {
-      id: d.id, name: d.label, promoApr: d.promoApr ?? 0, promoEnd: d.promoEnd!, deadline, projected, ok,
-      perMonth: ok ? null : needed((p) => (p.paidOff[d.id] ?? '9999-12') <= deadline),
-    }
+    return { id: d.id, name: d.label, short: d.short, promoApr: d.promoApr ?? 0, promoEnd: d.promoEnd!, deadline, projected, ok: projected != null && projected <= deadline }
   })
 
   // The card being paid off right now, and what's still being put on it.
@@ -519,21 +337,16 @@ export function planReport() {
       .map((d) => ({ date: d.date, amount: d.amount, kind: 'third paycheck' })),
   ].map((w) => ({ ...w, sendTo: nextGoal?.name ?? null }))
 
+  // For the daily briefing and the dashboard.
   const warnings: string[] = []
+  const last = spent.lastMonth ? ` ${monthName(spent.lastMonth.month).split(' ')[0]} was ${usd(spent.lastMonth.amount)}.` : ''
+  if (deadlines.length && ceiling == null) warnings.push('Some target dates are too soon to make even with no spending at all; move them later.')
+  else if (ceiling != null && spending > ceiling) warnings.push(`To make every payoff date, spending has to stay under ${usd(ceiling)}/mo; the plan uses ${usd(spending)}.${last}`)
   for (const p of promos) {
     if (p.ok) continue
-    warnings.push(`${p.name}: the ${p.promoApr}% rate ends ${dateName(p.promoEnd)}, but at this pace it's paid off ${p.projected ? monthName(p.projected) : 'not within 10 years'}.${p.perMonth != null ? ` It needs about ${usd(p.perMonth)}/mo more to be gone by ${monthName(p.deadline)}.` : ''}`)
-  }
-  for (const g of goals) {
-    if (g.status === 'behind') warnings.push(`${g.name}: projected ${monthName(g.projected)}, target ${monthName(g.by)}. Needs about ${usd(g.perMonth!)}/mo more.`)
-    if (g.status === 'not reachable' && g.by) warnings.push(`${g.name}: can't be reached by ${monthName(g.by)} at any realistic pace.`)
-  }
-  if (atActual && actual != null && actual > spending) {
-    warnings.push(`Actual spending averages ${usd(actual)}/mo, ${usd(actual - spending)} over the plan's ${usd(spending)}. At that rate you're debt-free ${monthName(atActual.debtFree)} instead of ${monthName(base.debtFree)}.`)
-  }
-  const shortMonths = base.rows.slice(1, 13).filter((r) => r.borrowed > 0)
-  if (shortMonths.length) {
-    warnings.push(`At ${usd(spending)}/mo spending, income doesn't cover spending plus minimum payments in ${shortMonths.length} of the next 12 months (about ${usd(shortMonths.reduce((s, r) => s + r.borrowed, 0) / shortMonths.length)} short each); the plan assumes that goes on a card.`)
+    const goal = goals.find((g) => g.kind === 'debt' && g.accountId === p.id)
+    const limit = goal?.limit ?? maxSpending(plan, state, ctx, (x) => (x.paidOff[p.id] ?? '9999-12') <= p.deadline)
+    warnings.push(`${p.short}: the ${p.promoApr}% rate ends ${dateName(p.promoEnd)}. ${limit != null ? `Clearing it in time means spending under ${usd(limit)}/mo.` : "It can't be cleared in time at any spending level."}`)
   }
   if (focus && focus.type === 'credit' && focus.count) {
     warnings.push(`${usd(focus.chargesThisMonth)} of new charges on ${focus.name} this month (${focus.count}), the card you're paying off.`)
@@ -541,9 +354,6 @@ export function planReport() {
   const noApr = state.debts.filter((d) => d.aprMissing)
   if (noApr.length) warnings.push(`No APR entered for ${noApr.map((d) => d.short).join(', ')}; counted as 0% (after any promo), so dates are optimistic. Add it in the Debt tab.`)
 
-  // Show the months up to the last milestone, plus a little after.
-  const lastMilestone = [base.debtFree, ...goals.map((g) => g.projected)].reduce<string | null>((a, b) => (b && (!a || b > a) ? b : a), null)
-  const span = lastMilestone ? (Number(lastMilestone.slice(0, 4)) - Number(month.slice(0, 4))) * 12 + Number(lastMilestone.slice(5)) - Number(month.slice(5)) + 3 : 60
   const debtTerms = debtSummary().map((d) => {
     const promo = Boolean(d.promo_end && d.promo_end > date)
     return {
@@ -555,8 +365,10 @@ export function planReport() {
   return {
     saved,
     plan,
-    detected: { income: detectedIncome(history), spending: actual },
-    spending: { planned: spending, actual, usingActual: plan.spending == null },
+    detected: { income: detectedIncome(history), spending: spent.average },
+    spending: { planned: spending, actual: spent.average, lastMonth: spent.lastMonth, usingActual: plan.spending == null },
+    ceiling,
+    debtFree: base.debtFree,
     accounts,
     debtTerms,
     goals,
@@ -564,12 +376,11 @@ export function planReport() {
     focus,
     windfalls,
     warnings,
-    debtFree: { plan: base.debtFree, actual: atActual ? atActual.debtFree : undefined },
-    months: base.rows.slice(0, Math.min(120, Math.max(12, span))),
+    // Inputs for the browser to rerun the projection as the spending slider moves.
+    model: { state, ctx },
     actual: planVsActual(plan, spending, state.debts.map((d) => d.id)),
   }
 }
-
 // Plan vs what happened, for recent months the history fully covers and this
 // month so far. "Left" is income minus spending: what was available for debt
 // payments and savings. Debt paid is payments minus new charges on the plan's debts.
@@ -612,7 +423,8 @@ export function planBrief() {
     const r = planReport()
     const recent = daysAgo(3)
     return {
-      debtFree: r.debtFree.plan,
+      debtFree: r.debtFree,
+      spendingLimit: r.ceiling,
       next: r.goals.filter((g) => g.status !== 'done').slice(0, 3).map((g) => ({ name: g.name, projected: g.projected, by: g.by, status: g.status, perMonth: g.perMonth })),
       focus: r.focus ? { name: r.focus.name, owed: r.focus.owed, chargesThisMonth: r.focus.chargesThisMonth, recentCharges: r.focus.recent.filter((c) => c.date >= recent) } : null,
       windfalls: r.windfalls,
