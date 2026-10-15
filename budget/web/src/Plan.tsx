@@ -557,44 +557,54 @@ function PlanEditor({ report, aiReady, onError, onDone }: { report: Report; aiRe
             <label>A recent payday <input type="date" value={income.lastPayday} onChange={(e) => e.target.value && setIncome({ lastPayday: e.target.value })} /></label>
           )}
           <label>Side income / month <NumInput value={income.side} onChange={(v) => setIncome({ side: v ?? 0 })} /></label>
-          <label>Bonus after tax <NumInput value={income.bonus} onChange={(v) => setIncome({ bonus: v ?? 0 })} /></label>
-        </div>
-        <div className="muted">Bonus paid in</div>
-        <div className="months-pick">
-          {MONTH_NAMES.map((name, i) => {
-            const m = i + 1
-            const on = income.bonusMonths.includes(m)
-            return (
-              <button key={name} type="button" className={`toggle ${on ? 'on' : ''}`}
-                onClick={() => setIncome({ bonusMonths: on ? income.bonusMonths.filter((x) => x !== m) : [...income.bonusMonths, m].sort((a, b) => a - b) })}>
-                {name}
-              </button>
-            )
-          })}
         </div>
         <p className="muted">
           From your deposits: {money(detected.paycheck)} {SCHEDULE_LABELS[detected.schedule]}
-          {detected.bonus ? `, bonus ${money(detected.bonus)} (${detected.bonusMonths.map((m) => MONTH_NAMES[m - 1]).join(', ')})` : ''}
-          {detected.side ? `, other income about ${dollars(detected.side)}/mo` : ''}.
+          {detected.bonuses.length ? `; bonuses ${detected.bonuses.map((b) => `${MONTH_NAMES[b.month - 1]} ${dollars(b.amount)}`).join(', ')}` : ''}
+          {detected.side ? `; other income about ${dollars(detected.side)}/mo` : ''}.
+          {detected.bonuses.length < 2 ? ' Bank sync only reaches back about 90 days; import older history (Accounts tab) to pick up the rest of your bonuses.' : ''}
         </p>
+
+        <h3>Bonuses</h3>
+        {income.bonuses.length > 0 && (
+          <table className="form-table">
+            <thead><tr><th>Paid in</th><th>Amount after tax</th><th /></tr></thead>
+            <tbody>
+              {income.bonuses.map((b) => (
+                <tr key={b.month}>
+                  <td>{MONTH_NAMES[b.month - 1]}</td>
+                  <td><NumInput value={b.amount} onChange={(v) => setIncome({ bonuses: income.bonuses.map((x) => (x.month === b.month ? { ...x, amount: v ?? 0 } : x)) })} /></td>
+                  <td><button className="link" onClick={() => setIncome({ bonuses: income.bonuses.filter((x) => x.month !== b.month) })}>Remove</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        <select className="mini-add" value="" onChange={(e) => {
+          const month = Number(e.target.value)
+          if (month) setIncome({ bonuses: [...income.bonuses, { month, amount: income.bonuses.at(-1)?.amount ?? 0 }].sort((a, b) => a.month - b.month) })
+        }}>
+          <option value="">+ Add a bonus month…</option>
+          {MONTH_NAMES.map((name, i) => !income.bonuses.some((b) => b.month === i + 1) && <option key={name} value={i + 1}>{name}</option>)}
+        </select>
+        <p className="muted">Amounts at today's pay. A raise grows them by the same share.</p>
 
         <h3>Raises</h3>
         {income.raises.length > 0 && (
           <table className="form-table">
-            <thead><tr><th>From</th><th>New paycheck</th><th>New bonus</th><th /></tr></thead>
+            <thead><tr><th>From</th><th>New paycheck</th><th /></tr></thead>
             <tbody>
               {income.raises.map((r, i) => (
                 <tr key={i}>
                   <td><input type="month" value={r.month} onChange={(e) => setRaise(i, { month: e.target.value })} /></td>
                   <td><NumInput value={r.paycheck} onChange={(v) => setRaise(i, { paycheck: v ?? 0 })} /></td>
-                  <td><NumInput value={r.bonus} placeholder="same" onChange={(v) => setRaise(i, { bonus: v })} /></td>
                   <td><button className="link" onClick={() => setIncome({ raises: income.raises.filter((_, j) => j !== i) })}>Remove</button></td>
                 </tr>
               ))}
             </tbody>
           </table>
         )}
-        <button className="mini-add" onClick={() => setIncome({ raises: [...income.raises, { month: '', paycheck: income.paycheck, bonus: null }] })}>+ Add raise</button>
+        <button className="mini-add" onClick={() => setIncome({ raises: [...income.raises, { month: '', paycheck: income.paycheck }] })}>+ Add raise</button>
       </section>
 
       <section>

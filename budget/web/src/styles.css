@@ -232,7 +232,6 @@ button.mini-add { margin-top: 6px; font-size: 13px; padding: 3px 10px; }
 .toolbar.spaced { margin-top: 14px; }
 .form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px 18px; margin-bottom: 12px; }
 .form-grid label { justify-content: space-between; }
-.months-pick { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 10px; }
 button.toggle { padding: 2px 9px; font-size: 12px; }
 button.toggle.on { background: var(--accent); border-color: var(--accent); color: var(--surface); }
 table.form-table { table-layout: auto; width: auto; max-width: 100%; }

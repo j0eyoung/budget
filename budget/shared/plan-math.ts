@@ -6,15 +6,15 @@ import type { DebtState } from './payoff.ts'
 
 export const SCHEDULES = ['weekly', 'biweekly', 'semimonthly', 'monthly'] as const
 export type Schedule = (typeof SCHEDULES)[number]
-export type Raise = { month: string; paycheck: number; bonus: number | null }
+export type Raise = { month: string; paycheck: number }
+export type Bonus = { month: number; amount: number } // month of the year 1-12, net amount
 export type Income = {
   paycheck: number // net, per paycheck
   schedule: Schedule // biweekly = every 14 days; semimonthly = twice a month
   lastPayday: string // any real payday; weekly and biweekly schedules count from it
-  bonus: number // net, per bonus
-  bonusMonths: number[] // 1-12
+  bonuses: Bonus[] // at today's pay; they grow with raises
   side: number // other monthly income
-  raises: Raise[] // new paycheck (and bonus) from a month on
+  raises: Raise[] // new paycheck from a month on
 }
 export type PlanEvent = { month: string; label: string; amount: number; monthly: boolean } // amount > 0 = money in
 export type GoalItem = { name: string; low: number; high: number; actual: number | null; done: boolean }
@@ -65,18 +65,25 @@ export function paychecksIn(inc: Income, month: string): number {
 }
 
 const paycheckAt = (inc: Income, month: string) => inc.raises.filter((r) => r.month <= month).at(-1)?.paycheck ?? inc.paycheck
-const bonusAt = (inc: Income, month: string) => inc.raises.filter((r) => r.month <= month && r.bonus != null).at(-1)?.bonus ?? inc.bonus
+
+// That month's bonus, grown by the same share as any raise before it (6% more
+// pay, 6% bigger bonus).
+export function bonusIn(inc: Income, month: string): number {
+  const bonus = inc.bonuses.find((b) => b.month === Number(month.slice(5)))
+  if (!bonus) return 0
+  return inc.paycheck > 0 ? (bonus.amount * paycheckAt(inc, month)) / inc.paycheck : bonus.amount
+}
 
 // The month's paychecks (minus `received` already in, for the current month)
-// plus a bonus in bonus months.
+// plus its bonus, if it has one and it isn't in yet.
 export function scheduledPay(inc: Income, month: string, received: number, bonusPaid: boolean): { amount: number; notes: string[] } {
   const count = paychecksIn(inc, month)
   const notes: string[] = []
   if (count >= 3 && inc.schedule === 'biweekly') notes.push('3 paychecks')
   if (inc.raises.some((r) => r.month === month)) notes.push('raise')
   let amount = Math.max(0, count - received) * paycheckAt(inc, month)
-  const bonus = bonusAt(inc, month)
-  if (bonus > 0 && inc.bonusMonths.includes(Number(month.slice(5))) && !bonusPaid) {
+  const bonus = bonusIn(inc, month)
+  if (bonus > 0 && !bonusPaid) {
     amount += bonus
     notes.push('bonus')
   }

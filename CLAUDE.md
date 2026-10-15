@@ -48,6 +48,6 @@ Schema:
 - `balance_snapshots(date, account_id, balance)`: daily signed balances, for net worth over time.
 - `recurring_overrides(merchant_key, label, status, cadence)`: the user's corrections to recurring detection; status yes (confirmed, cadence optional) or no (hidden). merchant_key is the normalized merchant from [budget/server/recurring.ts](budget/server/recurring.ts).
 - `rules(pattern, category_id)`, `insights(month, content, created_at)`, `meta(key, value)` (last_sync, last_sync_errors, last_sync_failure, last_backup, briefing, plan).
-- `meta.plan`: the payoff-and-savings plan as JSON (`json_extract` works): income {paycheck, schedule, lastPayday, bonus, bonusMonths, side, raises[]}, spending (planned monthly, null = actual average), events[] {month, label, amount, monthly}, goals[] in order {kind debt|savings, name, accountId, target, by, items[]}. Absent until the user saves one.
+- `meta.plan`: the payoff-and-savings plan as JSON (`json_extract` works): income {paycheck, schedule, lastPayday, bonuses[] {month 1-12, amount}, side, raises[] {month, paycheck}}, spending (planned monthly, null = actual average), events[] {month, label, amount, monthly}, goals[] in order {kind debt|savings, name, accountId, target, by, items[]}. Absent until the user saves one.
 
 Describe what the data shows; do not give personalized investment advice.

@@ -3,7 +3,7 @@ import { addMonths, estimateMinimum, promoDeadline } from '../shared/payoff.ts'
 import {
   SCHEDULES, deadlineGoals, eventsIn, goalDeadline, goalDone, goalMonth, maxSpending, meetsDeadline, project, scheduledPay,
 } from '../shared/plan-math.ts'
-import type { Context, Goal, Income, Plan, PlanDebt, PlanEvent, PlanState, Raise, Schedule } from '../shared/plan-math.ts'
+import type { Bonus, Context, Goal, Income, Plan, PlanDebt, PlanEvent, PlanState, Raise, Schedule } from '../shared/plan-math.ts'
 import { askClaude } from './claude.ts'
 import { db, meta } from './db.ts'
 import { debtSummary } from './debts.ts'
@@ -46,9 +46,10 @@ const dateName = (d: string) => new Date(`${d}T00:00:00Z`).toLocaleString('en-US
 type Deposit = { date: string; amount: number; label: string }
 
 // Paychecks come from the payer with the most money in over the last 120
-// days (at least 3 deposits). Its deposits near the usual amount are
-// paychecks; noticeably different ones over $200 are bonuses. Any other payer
-// with 2+ deposits in 90 days counts as side income.
+// days (at least 3 deposits). A deposit within 12% of that payer's typical
+// deposit around the same time (45 days either way, so raises and benefit
+// changes don't count) is a paycheck; anything else over $200 is a bonus.
+// Any other payer with 2+ deposits in 90 days counts as side income.
 function incomeHistory() {
   const rows = db.prepare(`
     SELECT l.date, -l.amount AS amount, COALESCE(l.merchant, l.name) AS label
@@ -73,8 +74,8 @@ function incomeHistory() {
     }
   }
   const deposits = groups.get(payer) ?? []
-  const usual = deposits.length ? median(deposits.filter((d) => d.date >= since).map((d) => d.amount)) : 0
-  const paychecks = deposits.filter((d) => Math.abs(d.amount - usual) <= usual * 0.05)
+  const typicalAround = (d: Deposit) => median(deposits.filter((x) => Math.abs(dayNum(x.date) - dayNum(d.date)) <= 45).map((x) => x.amount))
+  const paychecks = deposits.filter((d) => Math.abs(d.amount - typicalAround(d)) <= typicalAround(d) * 0.12)
   const bonuses = deposits.filter((d) => !paychecks.includes(d) && d.amount >= 200)
   let side = 0
   const sideSince = daysAgo(90)
@@ -104,8 +105,10 @@ function detectedIncome(h = incomeHistory()): Income {
     paycheck: recent.length ? round(median(recent.map((d) => d.amount))) : 0,
     schedule: detectSchedule(recent.map((d) => d.date)),
     lastPayday: recent.at(-1)?.date ?? today(),
-    bonus: round(h.bonuses.at(-1)?.amount ?? 0),
-    bonusMonths: [...new Set(h.bonuses.map((d) => Number(d.date.slice(5, 7))))].sort((a, b) => a - b),
+    // The latest bonus in each month of the year that had one.
+    bonuses: [...new Map(h.bonuses.map((d) => [Number(d.date.slice(5, 7)), round(d.amount)])).entries()]
+      .map(([month, amount]) => ({ month, amount }))
+      .sort((a, b) => a.month - b.month),
     side: h.side,
     raises: [],
   }
@@ -129,6 +132,21 @@ function spendingHistory(): { average: number | null; lastMonth: { month: string
 
 // ---- The plan document ----
 
+// One amount per month of the year. Plans saved before v0.5.3 had a single
+// `bonus` paid in each of `bonusMonths`.
+function normalizeBonuses(inc: any): Bonus[] {
+  const raw = Array.isArray(inc?.bonuses)
+    ? inc.bonuses
+    : list(inc?.bonusMonths).map((month) => ({ month, amount: inc?.bonus }))
+  const byMonth = new Map<number, number>()
+  for (const b of raw) {
+    const month = Number(b?.month)
+    const amount = Math.max(0, numOr(b?.amount, 0))
+    if (Number.isInteger(month) && month >= 1 && month <= 12 && amount > 0) byMonth.set(month, amount)
+  }
+  return [...byMonth.entries()].map(([month, amount]) => ({ month, amount })).sort((a, b) => a.month - b.month)
+}
+
 export function normalizePlan(input: any): Plan {
   const inc = input?.income ?? {}
   const accountIds = new Set((db.prepare('SELECT id FROM accounts').all() as { id: string }[]).map((a) => a.id))
@@ -139,11 +157,10 @@ export function normalizePlan(input: any): Plan {
       paycheck: Math.max(0, numOr(inc.paycheck, 0)),
       schedule: SCHEDULES.includes(inc.schedule) ? inc.schedule : 'biweekly',
       lastPayday: dateOrNull(inc.lastPayday) ?? detectedIncome().lastPayday,
-      bonus: Math.max(0, numOr(inc.bonus, 0)),
-      bonusMonths: [...new Set(list(inc.bonusMonths).map(Number).filter((m) => Number.isInteger(m) && m >= 1 && m <= 12))].sort((a, b) => a - b),
+      bonuses: normalizeBonuses(inc),
       side: Math.max(0, numOr(inc.side, 0)),
       raises: list(inc.raises)
-        .map((r) => ({ month: monthOrNull(r?.month), paycheck: Math.max(0, numOr(r?.paycheck, 0)), bonus: numOr(r?.bonus, null) }))
+        .map((r) => ({ month: monthOrNull(r?.month), paycheck: Math.max(0, numOr(r?.paycheck, 0)) }))
         .filter((r): r is Raise => r.month != null && r.paycheck > 0)
         .sort((a, b) => a.month.localeCompare(b.month))
         .slice(0, 20),
@@ -443,8 +460,8 @@ export async function importPlan(raw: string): Promise<{ plan: Plan; debts: Debt
   if (body.length < 40) throw new Error('Paste the written plan first.')
   const accounts = db.prepare(`SELECT id, name, org_name AS institution, type, ROUND(balance, 2) AS balance FROM accounts ORDER BY type, name`).all() as { id: string }[]
   const reply = await askClaude(`Turn this written personal financial plan into settings for a budgeting app. Reply with only JSON in this shape, no other text:
-{"income": {"paycheck": <net amount per paycheck now>, "bonus": <net amount per bonus now, 0 if none>, "bonusMonths": [<month numbers 1-12 when bonuses are paid>], "side": <other regular monthly income such as a side job>,
-  "raises": [{"month": "YYYY-MM", "paycheck": <new net per-paycheck amount>, "bonus": <new per-bonus amount or null>}]},
+{"income": {"paycheck": <net amount per paycheck now>, "bonuses": [{"month": <month of the year 1-12 it's paid in>, "amount": <net amount at today's pay>}], "side": <other regular monthly income such as a side job>,
+  "raises": [{"month": "YYYY-MM", "paycheck": <new net per-paycheck amount>}]},
  "spending": <planned monthly spending on everything except loan and credit card payments (housing, utilities, insurance, food, gas...), or null>,
  "events": [{"month": "YYYY-MM", "label": "<short>", "amount": <money in positive, money out negative>, "monthly": <true if it repeats every month from then on>}],
  "goals": [{"kind": "debt" or "savings", "name": "<short>", "accountId": "<id from the account list, or null>", "target": <savings target amount or null>, "by": "YYYY-MM" or null,
@@ -482,8 +499,9 @@ ${body}
       // How often pay actually lands is known from the deposits; a written plan can be wrong about it.
       schedule: current.income.schedule,
       lastPayday: current.income.lastPayday,
-      bonus: pick(inc.bonus, current.income.bonus),
-      bonusMonths: list(inc.bonusMonths).length ? inc.bonusMonths : current.income.bonusMonths,
+      // Bonus months the plan names take its amounts; months only the deposits
+      // show (one the plan forgot) are kept.
+      bonuses: [...current.income.bonuses.filter((b) => !list(inc.bonuses).some((x) => Number(x?.month) === b.month)), ...list(inc.bonuses)],
       side: pick(inc.side, current.income.side),
       raises: Array.isArray(inc.raises) ? inc.raises : current.income.raises,
     },
