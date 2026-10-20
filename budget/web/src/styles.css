@@ -251,6 +251,16 @@ table.form-table { table-layout: auto; width: auto; max-width: 100%; }
   .items-edit { padding-left: 0; }
 }
 
+/* Safe to spend */
+.allowance-main { margin: 2px 0 8px; }
+.allowance-main .hero-number { font-size: 34px; }
+.allowance .bar { height: 10px; margin-bottom: 8px; }
+.allowance details { margin-top: 6px; }
+.allowance-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 8px 24px; }
+.allowance-cols h3 { margin-top: 6px; }
+.line { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; padding: 3px 0; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+.line > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 .insight { white-space: pre-wrap; margin: 0 0 12px; }
 .qa { border-top: 1px solid var(--border); padding-top: 12px; margin-top: 12px; }
 .question { font-weight: 600; margin-bottom: 4px; }

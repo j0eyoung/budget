@@ -1,6 +1,7 @@
 import { askClaude } from './claude.ts'
 import { db, meta } from './db.ts'
 import { syncHealth } from './health.ts'
+import { safeToSpendBrief } from './allowance.ts'
 import { planBrief } from './plan.ts'
 import { budgetRows, currentMonth, today } from './queries.ts'
 import { detectRecurring } from './recurring.ts'
@@ -37,12 +38,13 @@ export function briefingData() {
     priceIncreases: recurring.filter((r) => r.increase && !r.stopped).map((r) => ({ merchant: r.merchant, ...r.increase })),
     connectionIssues: syncHealth().issues,
     plan: planBrief(),
+    safeToSpend: safeToSpendBrief(),
   }
 }
 
 export async function generateBriefing(): Promise<Briefing> {
   const data = briefingData()
-  const text = (await askClaude(`You write a short morning money check for one person. Using only the data below, list up to 4 things worth their attention today, one per line starting with "- ", plain text, specific dollar amounts. Worth flagging: unusually large recent charges, bills due in the next few days, price increases, categories over budget or pacing to go over (monthElapsed is the fraction of the month gone), broken account connections. From their payoff plan (plan): a bonus or third paycheck that just landed and the goal the plan sends it to (plan.windfalls), new charges in the last few days on the card they're paying off (plan.focus.recentCharges), and plan.warnings only if nothing more pressing. Do not give investment advice. If nothing stands out, reply exactly: Nothing to flag today.
+  const text = (await askClaude(`You write a short morning money check for one person. Using only the data below, list up to 4 things worth their attention today, one per line starting with "- ", plain text, specific dollar amounts. Worth flagging: unusually large recent charges, bills due in the next few days, price increases, categories over budget or pacing to go over (monthElapsed is the fraction of the month gone), broken account connections. From their payoff plan (plan): a bonus or third paycheck that just landed and the goal the plan sends it to (plan.windfalls), new charges in the last few days on the card they're paying off (plan.focus.recentCharges), and plan.warnings only if nothing more pressing. Weekly safe-to-spend (safeToSpend): how much is left of this week's spending money (bills excluded) and how many days are left; mention it when it's over or nearly gone. Do not give investment advice. If nothing stands out, reply exactly: Nothing to flag today.
 
 ${JSON.stringify(data)}`)).trim()
   const briefing = { date: data.date, text, createdAt: new Date().toISOString() }

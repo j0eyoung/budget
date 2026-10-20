@@ -102,11 +102,20 @@ export function PlanStrip({ onError, onOpen }: { onError: OnError; onOpen: () =>
         </p>
       )}
       {next.map((g) => {
-        const t = timing(g, g.projected)
+        // On time / late only means something against spending the user chose;
+        // otherwise show what each date needs.
+        const t = report.plan.spending != null ? timing(g, g.projected) : null
         return (
           <div className="account" key={g.id}>
-            <div>{g.name}<div className="muted">{when(g.projected)}{g.deadline ? ` · target ${monthLabel(g.deadline)}` : ''}</div></div>
-            <div className="right"><span className={`status ${t.tone}`}>{t.label}</span></div>
+            <div>
+              {g.name}
+              <div className="muted">
+                {g.deadline ? `by ${monthLabel(g.deadline)}` : 'no target date'}
+                {g.limit != null ? ` · spend under ${dollars(g.limit)}/mo` : ''}
+                {t && g.projected ? ` · on pace for ${monthLabel(g.projected)}` : ''}
+              </div>
+            </div>
+            {t && <div className="right"><span className={`status ${t.tone}`}>{t.label}</span></div>}
           </div>
         )
       })}

@@ -21,6 +21,7 @@ Personal budgeting app: Node 24 server (TypeScript run directly, no build step) 
 - Schema changes go through `addColumn` in [server/db.ts](server/db.ts) so existing databases (and restored backups) migrate on start.
 - [shared/payoff.ts](shared/payoff.ts) (debt payoff math) and [shared/plan-math.ts](shared/plan-math.ts) (the Plan's month-by-month projection and spending limit) are imported by both the server and the browser (the Plan tab's spending slider reruns the projection live), so they stay plain TypeScript with no Node or DOM imports.
 - Bank-file imports (`POST /api/accounts/:id/import`, parsed in [web/src/importParse.ts](web/src/importParse.ts)) skip rows on or after a synced account's first SimpleFIN date and rows whose date+amount the account already has. Because imports can reach further back for some accounts than others, averages start at `historyStart()` in [server/queries.ts](server/queries.ts), not at the earliest transaction.
+- Weekly safe-to-spend ([server/allowance.ts](server/allowance.ts)) is the plan's limit (the tighter of the deadline ceiling and planned spending) minus detected recurring bills, leaving out Debt Payments and the everyday `HABIT_CATEGORIES`, which count against the week.
 - The Plan ([server/plan.ts](server/plan.ts)) projects from real balances and the income schedule; "spending" there means expense categories except Debt Payments, because loan payments are modeled as debts. Keep that definition the same in the projection, the actual average and plan vs actual.
 
 ## Analyzing the user's finances

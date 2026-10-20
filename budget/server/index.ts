@@ -2,6 +2,7 @@ import crypto from 'node:crypto'
 import path from 'node:path'
 import express from 'express'
 import { aiAvailable, ask, categorizeWithAi, generateInsights } from './ai.ts'
+import { safeToSpend, safeToSpendBrief } from './allowance.ts'
 import { briefingData, cachedBriefing, generateBriefing } from './briefing.ts'
 import { authStatus, loginState, logout, sendLoginCode, startLogin } from './claude.ts'
 import { config } from './config.ts'
@@ -408,6 +409,10 @@ app.get('/api/debts', (_req, res) => {
   res.json(debtSummary().map((d) => ({ ...d, plan_rank: order.includes(d.id) ? order.indexOf(d.id) : null })))
 })
 
+app.get('/api/safe-to-spend', (_req, res) => {
+  res.json(safeToSpend())
+})
+
 app.get('/api/plan', (_req, res) => {
   res.json(planReport())
 })
@@ -416,10 +421,11 @@ app.get('/api/plan', (_req, res) => {
 app.put('/api/plan', (req, res) => {
   savePlan(req.body?.plan)
   const terms = Array.isArray(req.body?.debts) ? req.body.debts : []
+  // Only the fields sent are changed; a missing field leaves the account's value alone.
   for (const t of terms) {
     if (typeof t?.id !== 'string') continue
-    const { apr, promo_apr, promo_end, min_payment } = t
-    updateAccount(t.id, { apr, promo_apr, promo_end, min_payment })
+    const fields = Object.fromEntries(['apr', 'promo_apr', 'promo_end', 'min_payment'].filter((k) => k in t).map((k) => [k, t[k]]))
+    updateAccount(t.id, fields)
   }
   res.json(planReport())
 })
@@ -478,6 +484,7 @@ app.get('/api/summary', (_req, res) => {
     issues: syncHealth().issues,
     briefing: cachedBriefing()?.text ?? null,
     plan: planBrief(),
+    safeToSpend: safeToSpendBrief(),
   })
 })
 

@@ -14,6 +14,7 @@ Home Assistant add-on: personal budgeting with SimpleFIN bank sync and Claude Co
 
 ## What it does
 
+- **Safe to spend this week** (top of the dashboard): the plan's monthly spending limit minus your regular bills (mortgage, utilities, insurance, subscriptions), as a weekly amount, with what's left this week and per day. Bills and loan payments don't count against it; gas, groceries and other day-to-day spending do.
 - **Dashboard**: today's check ("anything to flag?"), spend vs budget with last-month comparison, tracked categories with running totals, monthly cash flow, net worth.
 - **Transactions**: AI categories, merchant rules, notes, and splits (one Costco trip into groceries + pharmacy). **receipt** takes a photo of the receipt; Claude groups the items by category and the split editor opens prefilled for you to confirm. The photo isn't stored.
 - **Budget**: monthly targets, 3-month averages, one-click fill from averages.
@@ -37,7 +38,7 @@ Home Assistant add-on: personal budgeting with SimpleFIN bank sync and Claude Co
 
 Send `Authorization: Bearer <api_token>` (not needed through ingress).
 
-- `GET /api/summary`: net worth, this month's spend vs budget, over-budget categories, balances, recent charges, bills due in the next 7 days, connection issues, today's briefing text, and the plan (debt-free date, next milestones, the card being paid off, warnings).
+- `GET /api/summary`: net worth, this month's spend vs budget, over-budget categories, balances, recent charges, bills due in the next 7 days, connection issues, today's briefing text, the plan (debt-free date, next milestones, the card being paid off, warnings), and this week's safe-to-spend.
 - `GET /api/briefing?generate=1`: today's "anything to flag?" text (generated through Claude if it hasn't been yet today) plus the data behind it.
 
 ## Development

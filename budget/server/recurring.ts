@@ -39,7 +39,7 @@ const nearestCadence = (days: number) =>
 
 // Regular trips to the same store aren't bills. In these categories only an
 // identical repeating amount (a membership, a meal plan) counts.
-const HABIT_CATEGORIES = new Set(['Groceries', 'Dining', 'Shopping', 'Transportation', 'Home', 'Personal Care'])
+export const HABIT_CATEGORIES = new Set(['Groceries', 'Dining', 'Shopping', 'Transportation', 'Home', 'Personal Care'])
 
 const DAY = 86400000
 const dayNumber = (date: string) => Date.parse(`${date}T00:00:00Z`) / DAY
